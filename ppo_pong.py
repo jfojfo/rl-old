@@ -5,6 +5,8 @@ import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 import torchvision
 import gym
+import argparse
+
 
 # Hyperparameters
 NUM_ENVS = 8
@@ -142,14 +144,15 @@ class PPO:
         self.policy_old = ActorCritic(input_dim, output_dim)
         self.policy_old.load_state_dict(self.policy.state_dict())  # Copy initial weights
 
-    def select_action(self, state):
+    def select_action(self, state, store=True):
         with torch.no_grad():
             state = torch.FloatTensor(state).unsqueeze(0).to(device)
             action, logprob, state_value = self.policy_old.act(state)
-        self.buffer.states.append(state.cpu().squeeze(0))
-        self.buffer.actions.append(action.cpu().squeeze(0))
-        self.buffer.logprobs.append(logprob.cpu().squeeze(0))
-        self.buffer.state_values.append(state_value.cpu().squeeze(0))
+        if store:
+            self.buffer.states.append(state.cpu().squeeze(0))
+            self.buffer.actions.append(action.cpu().squeeze(0))
+            self.buffer.logprobs.append(logprob.cpu().squeeze(0))
+            self.buffer.state_values.append(state_value.cpu().squeeze(0))
         return action.cpu().item()
 
     def add_buffer(self, reward, done):
@@ -212,13 +215,18 @@ def preprocess(image):
     return img
 
 # Training loop
-def train(num_epochs, load_from=None):
-    env = gym.make('Pong-v0', render_mode='rgb_array')
+def train(num_epochs, load_from=None, eval=False):
+    render_mode = 'human' if eval else 'rgb_array'
+    env = gym.make('Pong-v0', render_mode=render_mode)
     input_shape = env.observation_space.shape
     output_dim = env.action_space.n
     ppo_agent = PPO(input_shape, output_dim, lr_a=LR_A, lr_c=LR_C, gamma=GAMMA, K_epochs=K_EPOCHS, eps_clip=EPS_CLIP)
     ppo_agent.policy.to(device)
     ppo_agent.policy_old.to(device)
+
+    if eval:
+        ppo_agent.policy.eval()
+        ppo_agent.policy_old.eval()
 
     writer = SummaryWriter()
 
@@ -226,7 +234,7 @@ def train(num_epochs, load_from=None):
     total_steps = 0
 
     if load_from is not None:
-        saved_dict = torch.load(load_from)
+        saved_dict = torch.load(load_from, map_location=torch.device('cpu') if eval else None)
         ppo_agent.policy.load_state_dict(saved_dict['state_dict'])
         ppo_agent.policy_old.load_state_dict(saved_dict['state_dict'])
         ppo_agent.optimizer.load_state_dict(saved_dict['optimizer_state_dict'])
@@ -243,17 +251,18 @@ def train(num_epochs, load_from=None):
             step += 1
             total_steps += 1
 
-            action = ppo_agent.select_action(state)
+            action = ppo_agent.select_action(state, store=not eval)
             next_state, reward, done, _, _ = env.step(action)
             next_state = preprocess(next_state)
-            reward = reward + 0.01
-            ppo_agent.add_buffer(reward, done)
+            if not eval:
+                reward = reward + 0.01
+                ppo_agent.add_buffer(reward, done)
 
             state = next_state
             total_reward += reward
 
             # if step % EP_LEN == 0 or step == EP_MAX or done:
-            if done:
+            if done and not eval:
                 if len(ppo_agent.buffer.rewards) > 0:
                     # last_value = ppo_agent.compute_value(state)
                     last_value = 0.0
@@ -270,7 +279,7 @@ def train(num_epochs, load_from=None):
 
         print(f"Epoch {epoch+1}, steps: {step}, Total Reward: {total_reward}")
 
-        if (epoch + 1) % 100 == 0:
+        if (epoch + 1) % 100 == 0 and not eval:
             torch.save({
                 'state_dict': ppo_agent.policy.state_dict(),
                 'optimizer_state_dict': ppo_agent.optimizer.state_dict(),
@@ -282,5 +291,9 @@ def train(num_epochs, load_from=None):
 
 # Run the training loop
 if __name__ == "__main__":
-    load_from = f'{model_dir}/{model}.100.pth'
-    train(10000, None)
+    ap = argparse.ArgumentParser(description='Process args.')
+    ap.add_argument('--eval', action='store_true', help='evaluate')
+    ap.add_argument('--model', type=str, default=None, help='model to load')
+    args = ap.parse_args()
+
+    train(10000, args.model, args.eval)
