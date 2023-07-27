@@ -3,17 +3,18 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
+import torchvision
 import gym
 
 # Hyperparameters
 NUM_ENVS = 8
 EP_MAX = 20000
 EP_LEN = 256
-K_EPOCHS = 10
+K_EPOCHS = 8
 GAMMA = 0.99
 EPS_CLIP = 0.2
 LR_A = 0.0003
-LR_C = 0.001
+LR_C = 0.0005
 
 model_dir = 'models'
 model = 'ppo_pong'
@@ -21,27 +22,65 @@ model = 'ppo_pong'
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
+# Residual block implementation
+class ResidualBlock(nn.Module):
+    def __init__(self, in_channels, out_channels, stride=1):
+        super(ResidualBlock, self).__init__()
+
+        self.conv1 = nn.Conv2d(in_channels, out_channels, kernel_size=3, stride=stride, padding=1, bias=False)
+        self.bn1 = nn.BatchNorm2d(out_channels)
+        self.relu = nn.ReLU(inplace=True)
+        self.conv2 = nn.Conv2d(out_channels, out_channels, kernel_size=3, stride=1, padding=1, bias=False)
+        self.bn2 = nn.BatchNorm2d(out_channels)
+
+        self.downsample = None
+        if stride != 1 or in_channels != out_channels:
+            self.downsample = nn.Sequential(
+                nn.Conv2d(in_channels, out_channels, kernel_size=1, stride=stride, bias=False),
+                nn.BatchNorm2d(out_channels)
+            )
+
+    def forward(self, x):
+        identity = x
+
+        out = self.conv1(x)
+        out = self.bn1(out)
+        out = self.relu(out)
+
+        out = self.conv2(out)
+        out = self.bn2(out)
+
+        if self.downsample is not None:
+            identity = self.downsample(x)
+
+        out += identity
+        out = self.relu(out)
+
+        return out
+
 # Define the actor and critic networks
 class ActorCritic(nn.Module):
     def __init__(self, input_shape, output_dim):
         super(ActorCritic, self).__init__()
-        N = input_shape[0] * input_shape[1] * input_shape[2]
-        self.actor = nn.Sequential(
+        # N = input_shape[0] * input_shape[1] * input_shape[2]
+        self.conv_feature = nn.Sequential(
+            # 3, 80, 104
+            ResidualBlock(3, 16, stride=2),   # 16, 40, 52
+            ResidualBlock(16, 32, stride=2),  # 32, 20, 26
+            ResidualBlock(32, 32, stride=2),  # 32, 10, 13
             nn.Flatten(),
-            nn.Linear(N, 64),
+        )
+        N = 32 * 10 * 13
+        self.actor = nn.Sequential(
+            nn.Linear(N, 128),
             nn.ReLU(inplace=True),
-            nn.Linear(64, 64),
-            nn.ReLU(inplace=True),
-            nn.Linear(64, output_dim),
+            nn.Linear(128, output_dim),
             nn.Softmax(dim=-1),
         )
         self.critic = nn.Sequential(
-            nn.Flatten(),
-            nn.Linear(N, 64),
+            nn.Linear(N, 128),
             nn.ReLU(inplace=True),
-            nn.Linear(64, 64),
-            nn.ReLU(inplace=True),
-            nn.Linear(64, 1),
+            nn.Linear(128, 1),
         )
 
     # def forward(self, x):
@@ -51,19 +90,21 @@ class ActorCritic(nn.Module):
         # return action_probs, state_values
 
     def act(self, state):
-        action_probs = self.actor(state)
+        feature = self.conv_feature(state)
+        action_probs = self.actor(feature)
         dist = torch.distributions.Categorical(action_probs)
         action = dist.sample()
         action_logprob = dist.log_prob(action)
-        state_val = self.critic(state).squeeze(-1)
+        state_val = self.critic(feature).squeeze(-1)
         return action.detach(), action_logprob.detach(), state_val.detach()
 
     def evaluate(self, states, actions):
-        action_probs = self.actor(states)
+        feature = self.conv_feature(states)
+        action_probs = self.actor(feature)
         dist = torch.distributions.Categorical(action_probs)
         action_logprobs = dist.log_prob(actions)
         dist_entropy = dist.entropy()
-        state_values = self.critic(states)
+        state_values = self.critic(feature)
         return action_logprobs, state_values, dist_entropy
 
 class RolloutBuffer:
@@ -93,10 +134,11 @@ class PPO:
         self.buffer = RolloutBuffer()
 
         self.policy = ActorCritic(input_dim, output_dim)
-        self.optimizer = optim.Adam([
-            {'params': self.policy.actor.parameters(), 'lr': lr_a},
-            {'params': self.policy.critic.parameters(), 'lr': lr_c},
-        ])
+        # self.optimizer = optim.Adam([
+        #     {'params': self.policy.actor.parameters(), 'lr': lr_a},
+        #     {'params': self.policy.critic.parameters(), 'lr': lr_c},
+        # ])
+        self.optimizer = optim.Adam(self.policy.parameters(), lr=lr_c)
         self.policy_old = ActorCritic(input_dim, output_dim)
         self.policy_old.load_state_dict(self.policy.state_dict())  # Copy initial weights
 
@@ -163,12 +205,15 @@ class PPO:
             return loss, actor_loss, critic_loss
 
 def preprocess(image):
-    scaled_image = image / 255.
-    return scaled_image
+    img = image[1:-1, :, :]
+    scale = torchvision.transforms.ToTensor()
+    img = scale(img).transpose(1, 2)
+    img = torchvision.transforms.functional.resize(img, (int(img.shape[1] / 2), int(img.shape[2] / 2)))
+    return img
 
 # Training loop
 def train(num_epochs, load_from=None):
-    env = gym.make('Pong-v0', render_mode='human')
+    env = gym.make('Pong-v0', render_mode='rgb_array')
     input_shape = env.observation_space.shape
     output_dim = env.action_space.n
     ppo_agent = PPO(input_shape, output_dim, lr_a=LR_A, lr_c=LR_C, gamma=GAMMA, K_epochs=K_EPOCHS, eps_clip=EPS_CLIP)
@@ -237,5 +282,5 @@ def train(num_epochs, load_from=None):
 
 # Run the training loop
 if __name__ == "__main__":
-    load_from = f'{model_dir}/{model}.3.pth'
+    load_from = f'{model_dir}/{model}.100.pth'
     train(10000, None)
