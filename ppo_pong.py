@@ -3,6 +3,7 @@ import torch.nn as nn
 import torch.nn.functional as F
 import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
+from torch.utils.data import Dataset, DataLoader
 import torchvision
 import gym
 import argparse
@@ -17,6 +18,7 @@ GAMMA = 0.99
 EPS_CLIP = 0.2
 LR_A = 0.0003
 LR_C = 0.0005
+BATCH_SIZE = 512
 
 model_dir = 'models'
 model = 'ppo_pong'
@@ -109,31 +111,55 @@ class ActorCritic(nn.Module):
         state_values = self.critic(feature)
         return action_logprobs, state_values, dist_entropy
 
-class RolloutBuffer:
-    def __init__(self):
-        self.actions = []
+class RolloutBuffer(Dataset):
+    def __init__(self, batch_size=32, transform=None):
+        self.transform = transform
+        self.batch_size = batch_size
         self.states = []
+        self.actions = []
         self.logprobs = []
         self.rewards = []
         self.state_values = []
         self.dones = []
+        self.d_rewards = []
+
+    def __len__(self):
+        return len(self.rewards)
+
+    def __getitem__(self, index):
+        old_state = self.states[index]
+        old_action = self.actions[index]
+        old_logprob = self.logprobs[index]
+        old_state_value = self.state_values[index]
+        d_reward = self.d_rewards[index]
+
+        # Calculate advantage
+        advantage = d_reward - old_state_value
+        # d_rewards = (d_rewards - d_rewards.mean()) / (d_rewards.std() + 1e-7)
+
+        return old_state, old_action, old_logprob, old_state_value, d_reward, advantage
+
+    def make_batch(self):
+        data_loader = DataLoader(self, batch_size=self.batch_size, shuffle=True)
+        return data_loader
 
     def clear(self):
-        del self.actions[:]
         del self.states[:]
+        del self.actions[:]
         del self.logprobs[:]
         del self.rewards[:]
         del self.state_values[:]
         del self.dones[:]
+        del self.d_rewards[:]
 
 
 # Define the PPO algorithm
 class PPO:
-    def __init__(self, input_dim, output_dim, lr_a=0.0003, lr_c=0.001, gamma=0.99, K_epochs=4, eps_clip=0.2):
+    def __init__(self, input_dim, output_dim, lr_a=0.0003, lr_c=0.001, gamma=0.99, K_epochs=4, eps_clip=0.2, batch_size=256):
         self.gamma = gamma
         self.K_epochs = K_epochs
         self.eps_clip = eps_clip
-        self.buffer = RolloutBuffer()
+        self.buffer = RolloutBuffer(batch_size=batch_size)
 
         self.policy = ActorCritic(input_dim, output_dim)
         # self.optimizer = optim.Adam([
@@ -149,10 +175,10 @@ class PPO:
             state = torch.FloatTensor(state).unsqueeze(0).to(device)
             action, logprob, state_value = self.policy_old.act(state)
         if store:
-            self.buffer.states.append(state.cpu().squeeze(0))
-            self.buffer.actions.append(action.cpu().squeeze(0))
-            self.buffer.logprobs.append(logprob.cpu().squeeze(0))
-            self.buffer.state_values.append(state_value.cpu().squeeze(0))
+            self.buffer.states.append(state.cpu().squeeze(0).detach())
+            self.buffer.actions.append(action.cpu().squeeze(0).detach())
+            self.buffer.logprobs.append(logprob.cpu().squeeze(0).detach())
+            self.buffer.state_values.append(state_value.cpu().squeeze(0).detach())
         return action.cpu().item()
 
     def add_buffer(self, reward, done):
@@ -165,49 +191,63 @@ class PPO:
             action, logprob, state_value = self.policy_old.act(state)
         return state_value.cpu().item()
 
-    def discounted_rewards(self, last_value):
+    def discounted_rewards(self):
         returns = []
-        running_returns = last_value
+        running_returns = 0
         for t in reversed(range(len(self.buffer.rewards))):
             if self.buffer.rewards[t] in (-1, 1):
                 running_returns = 0
             running_returns = self.buffer.rewards[t] + self.gamma * running_returns * (1.0 - self.buffer.dones[t])
-            returns.append(running_returns)
+            returns.append(torch.tensor(running_returns).cpu())
         returns.reverse()
         return returns
 
-    def update(self, d_rewards):
+    def update(self):
         self.policy_old.load_state_dict(self.policy.state_dict())
 
-        old_states = torch.stack(self.buffer.states, dim=0).detach().to(device)
-        old_actions = torch.stack(self.buffer.actions, dim=0).detach().to(device)
-        old_logprobs = torch.stack(self.buffer.logprobs, dim=0).detach().to(device)
-        old_state_values = torch.stack(self.buffer.state_values, dim=0).detach().to(device)
+        d_rewards = self.discounted_rewards()
+        self.buffer.d_rewards = d_rewards
 
-        # Calculate advantage
-        d_rewards = torch.tensor(d_rewards, dtype=torch.float32).to(device)
-        # d_rewards = (d_rewards - d_rewards.mean()) / (d_rewards.std() + 1e-7)
-        advantages = d_rewards.detach() - old_state_values.detach()
+        epoch_loss = None
+        epoch_actor_loss = None
+        epoch_critic_loss = None
 
         # PPO policy updates
         for _ in range(self.K_epochs):
-            # Calculate surrogate loss
-            logprobs, state_values, dist_entropy = self.policy.evaluate(old_states, old_actions)
-            state_values = torch.squeeze(state_values)
-            ratios = torch.exp(logprobs - old_logprobs.detach())
+            epoch_loss = torch.tensor(0.0).to(device)
+            epoch_actor_loss = torch.tensor(0.0).to(device)
+            epoch_critic_loss = torch.tensor(0.0).to(device)
 
-            surr1 = ratios * advantages
-            surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * advantages
-
-            actor_loss = -torch.min(surr1, surr2).mean()
-            critic_loss = F.mse_loss(state_values, d_rewards)
-            loss = actor_loss + critic_loss
-
+            data_loader = self.buffer.make_batch()
+            for batch in data_loader:
+                batch = [item.to(device) for item in batch]
+                loss, actor_loss, critic_loss = self.loss_single_batch(*batch)
+                epoch_loss += loss
+                epoch_actor_loss += actor_loss
+                epoch_critic_loss += critic_loss
             # Optimize the model
+            epoch_loss = epoch_loss / len(data_loader.dataset)
+            epoch_actor_loss = epoch_actor_loss / len(data_loader.dataset)
+            epoch_critic_loss = epoch_critic_loss / len(data_loader.dataset)
             self.optimizer.zero_grad()
-            loss.backward()
+            epoch_loss.backward()
             self.optimizer.step()
-            return loss, actor_loss, critic_loss
+
+        return epoch_loss, epoch_actor_loss, epoch_critic_loss
+
+    def loss_single_batch(self, old_states, old_actions, old_logprobs, old_state_values, d_rewards, advantages):
+        # Calculate surrogate loss
+        logprobs, state_values, dist_entropy = self.policy.evaluate(old_states, old_actions)
+        state_values = torch.squeeze(state_values, -1)
+        ratios = torch.exp(logprobs - old_logprobs.detach())
+
+        surr1 = ratios * advantages
+        surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * advantages
+
+        actor_loss = -torch.min(surr1, surr2).sum()
+        critic_loss = F.mse_loss(state_values, d_rewards, reduction="sum")
+        loss = actor_loss + critic_loss
+        return loss, actor_loss, critic_loss
 
 def preprocess(image):
     img = image[1:-1, :, :]
@@ -222,7 +262,7 @@ def train(num_epochs, load_from=None, eval=False):
     env = gym.make('Pong-v0', render_mode=render_mode)
     input_shape = env.observation_space.shape
     output_dim = env.action_space.n
-    ppo_agent = PPO(input_shape, output_dim, lr_a=LR_A, lr_c=LR_C, gamma=GAMMA, K_epochs=K_EPOCHS, eps_clip=EPS_CLIP)
+    ppo_agent = PPO(input_shape, output_dim, lr_a=LR_A, lr_c=LR_C, gamma=GAMMA, K_epochs=K_EPOCHS, eps_clip=EPS_CLIP, batch_size=BATCH_SIZE)
     ppo_agent.policy.to(device)
     ppo_agent.policy_old.to(device)
 
@@ -265,10 +305,7 @@ def train(num_epochs, load_from=None, eval=False):
             # if step % EP_LEN == 0 or step == EP_MAX or done:
             if done and not eval:
                 if len(ppo_agent.buffer.rewards) > 0:
-                    # last_value = ppo_agent.compute_value(state)
-                    last_value = 0.0
-                    d_rewards = ppo_agent.discounted_rewards(last_value)
-                    loss, actor_loss, critic_loss = ppo_agent.update(d_rewards)
+                    loss, actor_loss, critic_loss = ppo_agent.update()
                     ppo_agent.buffer.clear()
 
                     writer.add_scalar('Loss/Total Loss', loss.item(), total_steps)
