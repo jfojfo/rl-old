@@ -169,6 +169,8 @@ class PPO:
         returns = []
         running_returns = last_value
         for t in reversed(range(len(self.buffer.rewards))):
+            if self.buffer.rewards[t] in (-1, 1):
+                running_returns = 0
             running_returns = self.buffer.rewards[t] + self.gamma * running_returns * (1.0 - self.buffer.dones[t])
             returns.append(running_returns)
         returns.reverse()
@@ -255,8 +257,7 @@ def train(num_epochs, load_from=None, eval=False):
             next_state, reward, done, _, _ = env.step(action)
             next_state = preprocess(next_state)
             if not eval:
-                reward = reward + 0.01
-                ppo_agent.add_buffer(reward, done)
+                ppo_agent.add_buffer(reward + 0.001 if reward == 0 else reward, done)
 
             state = next_state
             total_reward += reward
