@@ -5,6 +5,7 @@ import torch.optim as optim
 from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import Dataset, DataLoader
 import torchvision
+import numpy as np
 import gym
 import argparse
 
@@ -21,7 +22,7 @@ LR_C = 0.0005
 BATCH_SIZE = 512
 
 model_dir = 'models'
-model = 'ppo_pong'
+model = 'ppo_pong.diff'
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -64,27 +65,46 @@ class ResidualBlock(nn.Module):
 
 # Define the actor and critic networks
 class ActorCritic(nn.Module):
+    # def __init__(self, input_shape, output_dim):
+    #     super(ActorCritic, self).__init__()
+    #     # N = input_shape[0] * input_shape[1] * input_shape[2]
+    #     self.conv_feature = nn.Sequential(
+    #         # 3, 80, 104
+    #         ResidualBlock(3, 16, stride=2),   # 16, 40, 52
+    #         ResidualBlock(16, 32, stride=2),  # 32, 20, 26
+    #         ResidualBlock(32, 32, stride=2),  # 32, 10, 13
+    #         nn.Flatten(),
+    #     )
+    #     N = 32 * 10 * 13
+    #     self.actor = nn.Sequential(
+    #         nn.Linear(N, 128),
+    #         nn.ReLU(inplace=True),
+    #         nn.Linear(128, output_dim),
+    #         nn.Softmax(dim=-1),
+    #     )
+    #     self.critic = nn.Sequential(
+    #         nn.Linear(N, 128),
+    #         nn.ReLU(inplace=True),
+    #         nn.Linear(128, 1),
+    #     )
+
     def __init__(self, input_shape, output_dim):
         super(ActorCritic, self).__init__()
-        # N = input_shape[0] * input_shape[1] * input_shape[2]
-        self.conv_feature = nn.Sequential(
-            # 3, 80, 104
-            ResidualBlock(3, 16, stride=2),   # 16, 40, 52
-            ResidualBlock(16, 32, stride=2),  # 32, 20, 26
-            ResidualBlock(32, 32, stride=2),  # 32, 10, 13
-            nn.Flatten(),
-        )
-        N = 32 * 10 * 13
-        self.actor = nn.Sequential(
-            nn.Linear(N, 128),
+        N = 80 * 80
+        self.feature = nn.Sequential(
+            nn.Linear(N, 200),
             nn.ReLU(inplace=True),
-            nn.Linear(128, output_dim),
+        )
+        # self.feature = nn.Flatten()
+        self.actor = nn.Sequential(
+            # nn.Linear(N, 128),
+            # nn.ReLU(inplace=True),
+            nn.Linear(200, output_dim),
             nn.Softmax(dim=-1),
         )
         self.critic = nn.Sequential(
-            nn.Linear(N, 128),
-            nn.ReLU(inplace=True),
-            nn.Linear(128, 1),
+            # nn.Linear(N, 128),
+            nn.Linear(200, 1),
         )
 
     # def forward(self, x):
@@ -94,7 +114,7 @@ class ActorCritic(nn.Module):
         # return action_probs, state_values
 
     def act(self, state):
-        feature = self.conv_feature(state)
+        feature = self.feature(state)
         action_probs = self.actor(feature)
         dist = torch.distributions.Categorical(action_probs)
         action = dist.sample()
@@ -103,7 +123,7 @@ class ActorCritic(nn.Module):
         return action.detach(), action_logprob.detach(), state_val.detach()
 
     def evaluate(self, states, actions):
-        feature = self.conv_feature(states)
+        feature = self.feature(states)
         action_probs = self.actor(feature)
         dist = torch.distributions.Categorical(action_probs)
         action_logprobs = dist.log_prob(actions)
@@ -167,8 +187,9 @@ class PPO:
         #     {'params': self.policy.critic.parameters(), 'lr': lr_c},
         # ])
         self.optimizer = optim.Adam(self.policy.parameters(), lr=lr_c)
-        self.policy_old = ActorCritic(input_dim, output_dim)
-        self.policy_old.load_state_dict(self.policy.state_dict())  # Copy initial weights
+        # self.policy_old = ActorCritic(input_dim, output_dim)
+        self.policy_old = self.policy
+        # self.policy_old.load_state_dict(self.policy.state_dict())  # Copy initial weights
 
     def select_action(self, state, store=True):
         with torch.no_grad():
@@ -203,7 +224,7 @@ class PPO:
         return returns
 
     def update(self):
-        self.policy_old.load_state_dict(self.policy.state_dict())
+        # self.policy_old.load_state_dict(self.policy.state_dict())
 
         d_rewards = self.discounted_rewards()
         self.buffer.d_rewards = d_rewards
@@ -249,12 +270,28 @@ class PPO:
         loss = actor_loss + critic_loss
         return loss, actor_loss, critic_loss
 
-def preprocess(image):
-    img = image[1:-1, :, :]
-    scale = torchvision.transforms.ToTensor()
-    img = scale(img).transpose(1, 2)
-    img = torchvision.transforms.functional.resize(img, (int(img.shape[1] / 2), int(img.shape[2] / 2)))
-    return img
+# def preprocess(image):
+#     img = image[1:-1, :, :]
+#     scale = torchvision.transforms.ToTensor()
+#     img = scale(img).transpose(1, 2)
+#     img = torchvision.transforms.functional.resize(img, (int(img.shape[1] / 2), int(img.shape[2] / 2)))
+#     return img
+def preprocess(prev, curr):
+    img = curr[35:195]
+    img = img[::2, ::2, 0]
+    img[img == 144] = 0
+    img[img == 109] = 0
+    img[img != 0] = 1
+    if prev is None:
+        return img.astype(np.float32).ravel()
+    x2 = img
+    img = prev[35:195]
+    img = img[::2, ::2, 0]
+    img[img == 144] = 0
+    img[img == 109] = 0
+    img[img != 0] = 1
+    x1 = img
+    return (x2 - x1).astype(np.float32).ravel()
 
 # Training loop
 def train(num_epochs, load_from=None, eval=False):
@@ -285,8 +322,8 @@ def train(num_epochs, load_from=None, eval=False):
         print(f"loaded model from epoch {start_epoch}...")
 
     for epoch in range(start_epoch, num_epochs):
-        state, _ = env.reset()
-        state = preprocess(state)
+        curr_frame, _ = env.reset()
+        state = preprocess(None, curr_frame)
         total_reward = 0
         step = 0
         while step < EP_MAX:
@@ -294,10 +331,10 @@ def train(num_epochs, load_from=None, eval=False):
             total_steps += 1
 
             action = ppo_agent.select_action(state, store=not eval)
-            next_state, reward, done, _, _ = env.step(action)
-            next_state = preprocess(next_state)
+            next_frame, reward, done, _, _ = env.step(action)
+            next_state = preprocess(curr_frame, next_frame)
             if not eval:
-                ppo_agent.add_buffer(reward + 0.001 if reward == 0 else reward, done)
+                ppo_agent.add_buffer(reward + 0 if reward == 0 else reward, done)
 
             state = next_state
             total_reward += reward
@@ -316,6 +353,7 @@ def train(num_epochs, load_from=None, eval=False):
                 break
 
         print(f"Epoch {epoch+1}, steps: {step}, Total Reward: {total_reward}")
+        writer.add_scalar('Reward', total_reward, total_steps)
 
         if (epoch + 1) % 100 == 0 and not eval:
             torch.save({
@@ -329,6 +367,7 @@ def train(num_epochs, load_from=None, eval=False):
 
 # Run the training loop
 if __name__ == "__main__":
+    # python ppo_pong.py --eval --model models/ppo_pong.diff.5200.pth
     ap = argparse.ArgumentParser(description='Process args.')
     ap.add_argument('--eval', action='store_true', help='evaluate')
     ap.add_argument('--model', type=str, default=None, help='model to load')
