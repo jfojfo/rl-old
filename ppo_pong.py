@@ -17,12 +17,12 @@ EP_LEN = 256
 K_EPOCHS = 8
 GAMMA = 0.99
 EPS_CLIP = 0.2
-LR_A = 0.0003
-LR_C = 0.0005
+LR_A = 0.0001
+LR_C = 0.0001
 BATCH_SIZE = 512
 
 model_dir = 'models'
-model = 'ppo_pong.diff'
+model = 'ppo_pong.diff.RMSprop'
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -175,7 +175,7 @@ class RolloutBuffer(Dataset):
 
 # Define the PPO algorithm
 class PPO:
-    def __init__(self, input_dim, output_dim, lr_a=0.0003, lr_c=0.001, gamma=0.99, K_epochs=4, eps_clip=0.2, batch_size=256):
+    def __init__(self, input_dim, output_dim, lr_a=0.0001, lr_c=0.0001, gamma=0.99, K_epochs=4, eps_clip=0.2, batch_size=256):
         self.gamma = gamma
         self.K_epochs = K_epochs
         self.eps_clip = eps_clip
@@ -186,7 +186,8 @@ class PPO:
         #     {'params': self.policy.actor.parameters(), 'lr': lr_a},
         #     {'params': self.policy.critic.parameters(), 'lr': lr_c},
         # ])
-        self.optimizer = optim.Adam(self.policy.parameters(), lr=lr_c)
+        self.optimizer_a = optim.RMSprop(self.policy.parameters(), lr=lr_a)
+        self.optimizer_c = optim.RMSprop(self.policy.parameters(), lr=lr_c)
         # self.policy_old = ActorCritic(input_dim, output_dim)
         self.policy_old = self.policy
         # self.policy_old.load_state_dict(self.policy.state_dict())  # Copy initial weights
@@ -219,9 +220,11 @@ class PPO:
             if self.buffer.rewards[t] in (-1, 1):
                 running_returns = 0
             running_returns = self.buffer.rewards[t] + self.gamma * running_returns * (1.0 - self.buffer.dones[t])
-            returns.append(torch.tensor(running_returns).cpu())
+            returns.append(running_returns)
         returns.reverse()
-        return returns
+        d_rewards = np.array(returns, dtype=np.float32)
+        d_rewards = (d_rewards - np.mean(d_rewards)) / (np.std(d_rewards) + 1e-7)
+        return [torch.tensor(item) for item in d_rewards]
 
     def update(self):
         # self.policy_old.load_state_dict(self.policy.state_dict())
@@ -232,29 +235,53 @@ class PPO:
         epoch_loss = None
         epoch_actor_loss = None
         epoch_critic_loss = None
+        epoch_entropy_loss = None
 
         # PPO policy updates
         for _ in range(self.K_epochs):
             epoch_loss = torch.tensor(0.0).to(device)
             epoch_actor_loss = torch.tensor(0.0).to(device)
+            # epoch_critic_loss = torch.tensor(0.0).to(device)
+            epoch_entropy_loss = torch.tensor(0.0).to(device)
+
+            data_loader = self.buffer.make_batch()
+            for batch in data_loader:
+                batch = [item.to(device) for item in batch]
+                loss, actor_loss, critic_loss, entropy_loss = self.loss_single_batch(*batch)
+                epoch_loss += loss
+                epoch_actor_loss += actor_loss
+                # epoch_critic_loss += critic_loss
+                epoch_entropy_loss += entropy_loss
+            # Optimize the model
+            epoch_loss = epoch_loss / len(data_loader.dataset)
+            epoch_actor_loss = epoch_actor_loss / len(data_loader.dataset)
+            # epoch_critic_loss = epoch_critic_loss / len(data_loader.dataset)
+            epoch_entropy_loss = epoch_entropy_loss / len(data_loader.dataset)
+            self.optimizer_a.zero_grad()
+            (epoch_actor_loss + epoch_entropy_loss).backward()
+            self.optimizer_a.step()
+
+        for _ in range(self.K_epochs):
+            epoch_loss = torch.tensor(0.0).to(device)
+            # epoch_actor_loss = torch.tensor(0.0).to(device)
             epoch_critic_loss = torch.tensor(0.0).to(device)
 
             data_loader = self.buffer.make_batch()
             for batch in data_loader:
                 batch = [item.to(device) for item in batch]
-                loss, actor_loss, critic_loss = self.loss_single_batch(*batch)
+                loss, actor_loss, critic_loss, entropy_loss = self.loss_single_batch(*batch)
                 epoch_loss += loss
-                epoch_actor_loss += actor_loss
+                # epoch_actor_loss += actor_loss
                 epoch_critic_loss += critic_loss
             # Optimize the model
             epoch_loss = epoch_loss / len(data_loader.dataset)
-            epoch_actor_loss = epoch_actor_loss / len(data_loader.dataset)
+            # epoch_actor_loss = epoch_actor_loss / len(data_loader.dataset)
             epoch_critic_loss = epoch_critic_loss / len(data_loader.dataset)
-            self.optimizer.zero_grad()
-            epoch_loss.backward()
-            self.optimizer.step()
+            self.optimizer_c.zero_grad()
+            epoch_critic_loss.backward()
+            self.optimizer_c.step()
 
-        return epoch_loss, epoch_actor_loss, epoch_critic_loss
+        return epoch_loss, epoch_actor_loss, epoch_critic_loss, epoch_entropy_loss
 
     def loss_single_batch(self, old_states, old_actions, old_logprobs, old_state_values, d_rewards, advantages):
         # Calculate surrogate loss
@@ -267,8 +294,9 @@ class PPO:
 
         actor_loss = -torch.min(surr1, surr2).sum()
         critic_loss = F.mse_loss(state_values, d_rewards, reduction="sum")
-        loss = actor_loss + critic_loss
-        return loss, actor_loss, critic_loss
+        entropy_loss = -0.005 * dist_entropy.sum()
+        loss = actor_loss + critic_loss + entropy_loss
+        return loss, actor_loss, critic_loss, entropy_loss
 
 # def preprocess(image):
 #     img = image[1:-1, :, :]
@@ -316,7 +344,8 @@ def train(num_epochs, load_from=None, eval=False):
         saved_dict = torch.load(load_from, map_location=torch.device('cpu') if eval else None)
         ppo_agent.policy.load_state_dict(saved_dict['state_dict'])
         ppo_agent.policy_old.load_state_dict(saved_dict['state_dict'])
-        ppo_agent.optimizer.load_state_dict(saved_dict['optimizer_state_dict'])
+        ppo_agent.optimizer_a.load_state_dict(saved_dict['optimizer_a_state_dict'])
+        ppo_agent.optimizer_c.load_state_dict(saved_dict['optimizer_c_state_dict'])
         start_epoch = saved_dict['epoch']
         total_steps = saved_dict['total_steps']
         print(f"loaded model from epoch {start_epoch}...")
@@ -326,6 +355,7 @@ def train(num_epochs, load_from=None, eval=False):
         state = preprocess(None, curr_frame)
         total_reward = 0
         step = 0
+        ppo_agent.buffer.clear()
         while step < EP_MAX:
             step += 1
             total_steps += 1
@@ -334,7 +364,7 @@ def train(num_epochs, load_from=None, eval=False):
             next_frame, reward, done, _, _ = env.step(action)
             next_state = preprocess(curr_frame, next_frame)
             if not eval:
-                ppo_agent.add_buffer(reward + 0 if reward == 0 else reward, done)
+                ppo_agent.add_buffer(reward, done)
 
             state = next_state
             total_reward += reward
@@ -342,12 +372,13 @@ def train(num_epochs, load_from=None, eval=False):
             # if step % EP_LEN == 0 or step == EP_MAX or done:
             if done and not eval:
                 if len(ppo_agent.buffer.rewards) > 0:
-                    loss, actor_loss, critic_loss = ppo_agent.update()
+                    loss, actor_loss, critic_loss, entropy_loss = ppo_agent.update()
                     ppo_agent.buffer.clear()
 
                     writer.add_scalar('Loss/Total Loss', loss.item(), total_steps)
                     writer.add_scalar('Loss/Actor Loss', actor_loss.item(), total_steps)
                     writer.add_scalar('Loss/Critic Loss', critic_loss.item(), total_steps)
+                    writer.add_scalar('Loss/Entropy Loss', entropy_loss.item(), total_steps)
 
             if done:
                 break
@@ -358,7 +389,8 @@ def train(num_epochs, load_from=None, eval=False):
         if (epoch + 1) % 100 == 0 and not eval:
             torch.save({
                 'state_dict': ppo_agent.policy.state_dict(),
-                'optimizer_state_dict': ppo_agent.optimizer.state_dict(),
+                'optimizer_a_state_dict': ppo_agent.optimizer_a.state_dict(),
+                'optimizer_c_state_dict': ppo_agent.optimizer_c.state_dict(),
                 'epoch': epoch + 1,
                 'total_steps': total_steps,
             }, f'{model_dir}/{model}.{epoch + 1}.pth')
