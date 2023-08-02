@@ -6,8 +6,11 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import Dataset, DataLoader
 import torchvision
 import numpy as np
-import gym
+import gymnasium as gym
 import argparse
+
+
+# good: https://hrl.boyuai.com/chapter/2/ppo%E7%AE%97%E6%B3%95/
 
 
 # Hyperparameters
@@ -17,12 +20,12 @@ EP_LEN = 256
 K_EPOCHS = 8
 GAMMA = 0.99
 EPS_CLIP = 0.2
-LR_A = 0.0001
-LR_C = 0.0001
+LR_A = 1e-4
+LR_C = 1e-4
 BATCH_SIZE = 512
 
 model_dir = 'models'
-model = 'ppo_pong.diff.RMSprop'
+model = 'ppo_pong.diff'
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -91,19 +94,20 @@ class ActorCritic(nn.Module):
     def __init__(self, input_shape, output_dim):
         super(ActorCritic, self).__init__()
         N = 80 * 80
-        self.feature = nn.Sequential(
-            nn.Linear(N, 200),
-            nn.ReLU(inplace=True),
-        )
+        # self.feature = nn.Sequential(
+        #     nn.Linear(N, 200),
+        #     nn.ReLU(inplace=True),
+        # )
         # self.feature = nn.Flatten()
         self.actor = nn.Sequential(
-            # nn.Linear(N, 128),
-            # nn.ReLU(inplace=True),
+            nn.Linear(N, 200),
+            nn.ReLU(inplace=True),
             nn.Linear(200, output_dim),
             nn.Softmax(dim=-1),
         )
         self.critic = nn.Sequential(
-            # nn.Linear(N, 128),
+            nn.Linear(N, 200),
+            nn.ReLU(inplace=True),
             nn.Linear(200, 1),
         )
 
@@ -114,7 +118,8 @@ class ActorCritic(nn.Module):
         # return action_probs, state_values
 
     def act(self, state):
-        feature = self.feature(state)
+        # feature = self.feature(state)
+        feature = state
         action_probs = self.actor(feature)
         dist = torch.distributions.Categorical(action_probs)
         action = dist.sample()
@@ -123,7 +128,8 @@ class ActorCritic(nn.Module):
         return action.detach(), action_logprob.detach(), state_val.detach()
 
     def evaluate(self, states, actions):
-        feature = self.feature(states)
+        # feature = self.feature(states)
+        feature = states
         action_probs = self.actor(feature)
         dist = torch.distributions.Categorical(action_probs)
         action_logprobs = dist.log_prob(actions)
@@ -152,15 +158,10 @@ class RolloutBuffer(Dataset):
         old_logprob = self.logprobs[index]
         old_state_value = self.state_values[index]
         d_reward = self.d_rewards[index]
-
-        # Calculate advantage
-        advantage = d_reward - old_state_value
-        # d_rewards = (d_rewards - d_rewards.mean()) / (d_rewards.std() + 1e-7)
-
-        return old_state, old_action, old_logprob, old_state_value, d_reward, advantage
+        return old_state, old_action, old_logprob, old_state_value, d_reward
 
     def make_batch(self):
-        data_loader = DataLoader(self, batch_size=self.batch_size, shuffle=True)
+        data_loader = DataLoader(self, batch_size=self.batch_size, shuffle=True, drop_last=True)
         return data_loader
 
     def clear(self):
@@ -186,8 +187,7 @@ class PPO:
         #     {'params': self.policy.actor.parameters(), 'lr': lr_a},
         #     {'params': self.policy.critic.parameters(), 'lr': lr_c},
         # ])
-        self.optimizer_a = optim.RMSprop(self.policy.parameters(), lr=lr_a)
-        self.optimizer_c = optim.RMSprop(self.policy.parameters(), lr=lr_c)
+        self.optimizer = optim.Adam(self.policy.parameters(), lr=lr_c)
         # self.policy_old = ActorCritic(input_dim, output_dim)
         self.policy_old = self.policy
         # self.policy_old.load_state_dict(self.policy.state_dict())  # Copy initial weights
@@ -222,9 +222,7 @@ class PPO:
             running_returns = self.buffer.rewards[t] + self.gamma * running_returns * (1.0 - self.buffer.dones[t])
             returns.append(running_returns)
         returns.reverse()
-        d_rewards = np.array(returns, dtype=np.float32)
-        d_rewards = (d_rewards - np.mean(d_rewards)) / (np.std(d_rewards) + 1e-7)
-        return [torch.tensor(item) for item in d_rewards]
+        return [torch.tensor(item) for item in returns]
 
     def update(self):
         # self.policy_old.load_state_dict(self.policy.state_dict())
@@ -232,69 +230,51 @@ class PPO:
         d_rewards = self.discounted_rewards()
         self.buffer.d_rewards = d_rewards
 
-        epoch_loss = None
-        epoch_actor_loss = None
-        epoch_critic_loss = None
-        epoch_entropy_loss = None
-
         # PPO policy updates
         for _ in range(self.K_epochs):
             epoch_loss = torch.tensor(0.0).to(device)
             epoch_actor_loss = torch.tensor(0.0).to(device)
-            # epoch_critic_loss = torch.tensor(0.0).to(device)
+            epoch_critic_loss = torch.tensor(0.0).to(device)
             epoch_entropy_loss = torch.tensor(0.0).to(device)
 
             data_loader = self.buffer.make_batch()
             for batch in data_loader:
                 batch = [item.to(device) for item in batch]
+                if len(batch[0]) == 1:
+                    # advantage.std() will be nan
+                    break
                 loss, actor_loss, critic_loss, entropy_loss = self.loss_single_batch(*batch)
                 epoch_loss += loss
                 epoch_actor_loss += actor_loss
-                # epoch_critic_loss += critic_loss
+                epoch_critic_loss += critic_loss
                 epoch_entropy_loss += entropy_loss
             # Optimize the model
             epoch_loss = epoch_loss / len(data_loader.dataset)
             epoch_actor_loss = epoch_actor_loss / len(data_loader.dataset)
-            # epoch_critic_loss = epoch_critic_loss / len(data_loader.dataset)
-            epoch_entropy_loss = epoch_entropy_loss / len(data_loader.dataset)
-            self.optimizer_a.zero_grad()
-            (epoch_actor_loss + epoch_entropy_loss).backward()
-            self.optimizer_a.step()
-
-        for _ in range(self.K_epochs):
-            epoch_loss = torch.tensor(0.0).to(device)
-            # epoch_actor_loss = torch.tensor(0.0).to(device)
-            epoch_critic_loss = torch.tensor(0.0).to(device)
-
-            data_loader = self.buffer.make_batch()
-            for batch in data_loader:
-                batch = [item.to(device) for item in batch]
-                loss, actor_loss, critic_loss, entropy_loss = self.loss_single_batch(*batch)
-                epoch_loss += loss
-                # epoch_actor_loss += actor_loss
-                epoch_critic_loss += critic_loss
-            # Optimize the model
-            epoch_loss = epoch_loss / len(data_loader.dataset)
-            # epoch_actor_loss = epoch_actor_loss / len(data_loader.dataset)
             epoch_critic_loss = epoch_critic_loss / len(data_loader.dataset)
-            self.optimizer_c.zero_grad()
-            epoch_critic_loss.backward()
-            self.optimizer_c.step()
+            epoch_entropy_loss = epoch_entropy_loss / len(data_loader.dataset)
+            self.optimizer.zero_grad()
+            epoch_loss.backward()
+            self.optimizer.step()
 
         return epoch_loss, epoch_actor_loss, epoch_critic_loss, epoch_entropy_loss
 
-    def loss_single_batch(self, old_states, old_actions, old_logprobs, old_state_values, d_rewards, advantages):
+    def loss_single_batch(self, old_states, old_actions, old_logprobs, old_state_values, d_rewards):
         # Calculate surrogate loss
         logprobs, state_values, dist_entropy = self.policy.evaluate(old_states, old_actions)
         state_values = torch.squeeze(state_values, -1)
         ratios = torch.exp(logprobs - old_logprobs.detach())
+
+        # Calculate advantage
+        advantages = (d_rewards - state_values).detach()
+        advantages_norm = (advantages - advantages.mean()) / (advantages.std() + 1e-7)
 
         surr1 = ratios * advantages
         surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * advantages
 
         actor_loss = -torch.min(surr1, surr2).sum()
         critic_loss = F.mse_loss(state_values, d_rewards, reduction="sum")
-        entropy_loss = -0.005 * dist_entropy.sum()
+        entropy_loss = -0.01 * dist_entropy.sum()
         loss = actor_loss + critic_loss + entropy_loss
         return loss, actor_loss, critic_loss, entropy_loss
 
@@ -312,19 +292,23 @@ def preprocess(prev, curr):
     img[img != 0] = 1
     if prev is None:
         return img.astype(np.float32).ravel()
-    x2 = img
+    x2 = img.astype(np.float32)
+
     img = prev[35:195]
     img = img[::2, ::2, 0]
     img[img == 144] = 0
     img[img == 109] = 0
     img[img != 0] = 1
-    x1 = img
-    return (x2 - x1).astype(np.float32).ravel()
+    x1 = img.astype(np.float32)
+
+    diff = ((x2 - x1) + 1.0) / 2.0
+    return diff.ravel()
 
 # Training loop
 def train(num_epochs, load_from=None, eval=False):
     render_mode = 'human' if eval else 'rgb_array'
-    env = gym.make('Pong-v0', render_mode=render_mode)
+    # PongDeterministic-v0
+    env = gym.make('PongDeterministic-v0', render_mode=render_mode)
     input_shape = env.observation_space.shape
     output_dim = env.action_space.n
     ppo_agent = PPO(input_shape, output_dim, lr_a=LR_A, lr_c=LR_C, gamma=GAMMA, K_epochs=K_EPOCHS, eps_clip=EPS_CLIP, batch_size=BATCH_SIZE)
@@ -344,8 +328,7 @@ def train(num_epochs, load_from=None, eval=False):
         saved_dict = torch.load(load_from, map_location=torch.device('cpu') if eval else None)
         ppo_agent.policy.load_state_dict(saved_dict['state_dict'])
         ppo_agent.policy_old.load_state_dict(saved_dict['state_dict'])
-        ppo_agent.optimizer_a.load_state_dict(saved_dict['optimizer_a_state_dict'])
-        ppo_agent.optimizer_c.load_state_dict(saved_dict['optimizer_c_state_dict'])
+        ppo_agent.optimizer.load_state_dict(saved_dict['optimizer_state_dict'])
         start_epoch = saved_dict['epoch']
         total_steps = saved_dict['total_steps']
         print(f"loaded model from epoch {start_epoch}...")
@@ -366,6 +349,7 @@ def train(num_epochs, load_from=None, eval=False):
             if not eval:
                 ppo_agent.add_buffer(reward, done)
 
+            curr_frame = next_frame
             state = next_state
             total_reward += reward
 
@@ -389,8 +373,7 @@ def train(num_epochs, load_from=None, eval=False):
         if (epoch + 1) % 100 == 0 and not eval:
             torch.save({
                 'state_dict': ppo_agent.policy.state_dict(),
-                'optimizer_a_state_dict': ppo_agent.optimizer_a.state_dict(),
-                'optimizer_c_state_dict': ppo_agent.optimizer_c.state_dict(),
+                'optimizer_state_dict': ppo_agent.optimizer.state_dict(),
                 'epoch': epoch + 1,
                 'total_steps': total_steps,
             }, f'{model_dir}/{model}.{epoch + 1}.pth')
@@ -405,4 +388,4 @@ if __name__ == "__main__":
     ap.add_argument('--model', type=str, default=None, help='model to load')
     args = ap.parse_args()
 
-    train(10000, args.model, args.eval)
+    train(50000, args.model, args.eval)
