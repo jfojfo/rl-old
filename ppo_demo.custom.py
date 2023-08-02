@@ -35,8 +35,8 @@ TRANSFER_LEARNING = False
 
 MODEL_DIR = 'models'
 MODEL = 'ppo_demo'
-# ENV_ID = 'PongDeterministic-v0'
 ENV_ID = 'Pong-v0'
+# ENV_ID = 'PongDeterministic-v0'
 
 
 class CNN(nn.Module):
@@ -166,7 +166,7 @@ def test_env(env, model, device):
     return total_reward
 
 def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_epoch, best_reward, early_stop=False):
-    writer = SummaryWriter()
+    writer = SummaryWriter(comment=f'.{MODEL}.{ENV_ID}')
     env_test = gym.make(ENV_ID, render_mode='rgb_array')
 
     state = envs.reset()
