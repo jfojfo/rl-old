@@ -35,6 +35,8 @@ TRANSFER_LEARNING = False
 
 MODEL_DIR = 'models'
 MODEL = 'ppo_demo'
+# ENV_ID = 'PongDeterministic-v0'
+ENV_ID = 'Pong-v0'
 
 
 class CNN(nn.Module):
@@ -165,7 +167,7 @@ def test_env(env, model, device):
 
 def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_epoch, best_reward, early_stop=False):
     writer = SummaryWriter()
-    env_test = gym.make('Pong-v0', render_mode='rgb_array')
+    env_test = gym.make(ENV_ID, render_mode='rgb_array')
 
     state = envs.reset()
     state = grey_crop_resize_batch(state)
@@ -259,7 +261,7 @@ def train(load_from=None):
     device = torch.device("cuda" if use_cuda else "cpu")
     print('Device:', device)
 
-    envs = [lambda: gym.make('Pong-v0', render_mode='rgb_array')] * N  # Prepare N actors in N environments
+    envs = [lambda: gym.make(ENV_ID, render_mode='rgb_array')] * N  # Prepare N actors in N environments
     envs = SubprocVecEnv(envs)  # Vectorized Environments are a method for stacking multiple independent environments into a single environment. Instead of the training an RL agent on 1 environment per step, it allows us to train it on n environments per step. Because of this, actions passed to the environment are now a vector (of dimension n). It is the same for observations, rewards and end of episode signals (dones). In the case of non-array observation spaces such as Dict or Tuple, where different sub-spaces may have different shapes, the sub-observations are vectors (of dimension n).
     num_inputs = 1
     num_outputs = envs.action_space.n
@@ -287,8 +289,23 @@ def train(load_from=None):
     ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_epoch, best_reward)
 
 
-def eval(load_from=None):
-    pass
+def eval(load_from):
+    use_cuda = torch.cuda.is_available()  # Autodetect CUDA
+    device = torch.device("cuda" if use_cuda else "cpu")
+    print('Device:', device)
+
+    env_test = gym.make(ENV_ID, render_mode='human')
+
+    num_inputs = 1
+    num_outputs = env_test.action_space.n
+    model = CNN(num_inputs, num_outputs, H_SIZE).to(device)
+
+    checkpoint = torch.load(load_from, map_location=None if use_cuda else torch.device('cpu'))
+    model.load_state_dict(checkpoint['state_dict'])
+
+    while True:
+        test_env(env_test, model, device)
+
 
 if __name__ == "__main__":
     # python ppo_pong.py --eval --model models/ppo_pong.diff.5200.pth
