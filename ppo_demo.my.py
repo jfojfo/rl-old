@@ -28,7 +28,7 @@ N = 8 # simultaneous processing environments
 T = 256 # PPO steps to get envs data
 M = 64 # mini batch size
 K = 10 # PPO epochs repeated to optimise
-T_EPOCHS = 10 # T_EPOCH to test and save
+T_EPOCHS = 100 # T_EPOCH to test and save
 N_TESTS = 10 # do N_TESTS tests
 TARGET_REWARD = 20
 TRANSFER_LEARNING = False
@@ -164,11 +164,15 @@ def test_env(env, model, device):
     return total_reward
 
 def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_epoch, best_reward, early_stop=False):
-    writer = None
+    writer = SummaryWriter()
     env_test = gym.make('Pong-v0', render_mode='rgb_array')
 
     state = envs.reset()
     state = grey_crop_resize_batch(state)
+
+    total_reward_1_env = 0
+    total_runs_1_env = 0
+    steps_1_env = 0
 
     while not early_stop:
         log_probs = []
@@ -178,7 +182,7 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
         rewards = []
         masks = []
 
-        for _ in range(T):
+        for i in range(T):
             state = torch.FloatTensor(state).to(device)
             dist, value = model(state)
             action = dist.sample().to(device)
@@ -195,6 +199,15 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
             states.append(state)
             state = next_state
 
+            total_reward_1_env += reward[0]
+            steps_1_env += 1
+            if done[0]:
+                total_runs_1_env += 1
+                print(f'Run {total_runs_1_env}, steps {steps_1_env}, Reward {total_reward_1_env}')
+                writer.add_scalar('Reward/train_reward_1_env', total_reward_1_env, train_epoch * T + i + 1)
+                total_reward_1_env = 0
+                steps_1_env = 0
+
         next_state = torch.FloatTensor(next_state).to(device)  # consider last state of the collection step
         _, next_value = model(next_state)  # collect last value effect of the last collection step
         returns = compute_gae(next_value, rewards, masks, values)
@@ -209,8 +222,6 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
             model, optimizer, states, actions, log_probs, returns, advantage)
         train_epoch += 1
 
-        if writer is None:
-            writer = SummaryWriter()
         total_steps = train_epoch * T
         writer.add_scalar('Loss/Total Loss', loss.item(), total_steps)
         writer.add_scalar('Loss/Actor Loss', actor_loss.item(), total_steps)
@@ -222,7 +233,7 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
             test_rewards.append(test_reward)  # collect the mean rewards for saving performance metric
             test_epochs.append(train_epoch)
             print('Epoch: %s -> Reward: %s' % (train_epoch, test_reward))
-            writer.add_scalar('Reward', test_reward, total_steps)
+            writer.add_scalar('Reward/test_reward', test_reward, total_steps)
 
             if best_reward is None or best_reward < test_reward:  # save a checkpoint every time it achieves a better reward
                 if best_reward is not None:
