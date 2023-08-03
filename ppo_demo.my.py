@@ -35,8 +35,8 @@ TRANSFER_LEARNING = False
 
 MODEL_DIR = 'models'
 MODEL = 'ppo_demo'
-ENV_ID = 'Pong-v0'
-# ENV_ID = 'PongDeterministic-v0'
+# ENV_ID = 'Pong-v0'
+ENV_ID = 'PongDeterministic-v0'
 
 
 class CNN(nn.Module):
@@ -80,16 +80,7 @@ def normalize(x):
 def grey_crop_resize_batch(state):  # deal with batch observations
     states = []
     for i in state:
-        img = Image.fromarray(i)
-        grey_img = img.convert(mode='L')
-        left = 0
-        top = 34  # empirically chosen
-        right = 160
-        bottom = 194  # empiricallly chosen
-        cropped_img = grey_img.crop((left, top, right, bottom)) # cropped image of above dimension
-        resized_img = cropped_img.resize((84, 84))
-        array_2d = np.asarray(resized_img)
-        array_3d = np.expand_dims(array_2d, axis=0)
+        array_3d = grey_crop_resize(i)
         array_4d = np.expand_dims(array_3d, axis=0)
         states.append(array_4d)
     states_array = np.vstack(states) # turn the stack into array

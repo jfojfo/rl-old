@@ -16,7 +16,6 @@ import argparse
 #
 
 
-ENV_ID = "Pong-v0"
 H_SIZE = 256 # hidden size, linear units of the output layer
 L_RATE = 1e-5 # learning rate, gradient coefficient for CNN weight update
 G_GAE = 0.99 # gamma param for GAE
@@ -80,16 +79,7 @@ def normalize(x):
 def grey_crop_resize_batch(state):  # deal with batch observations
     states = []
     for i in state:
-        img = Image.fromarray(i)
-        grey_img = img.convert(mode='L')
-        left = 0
-        top = 34  # empirically chosen
-        right = 160
-        bottom = 194  # empiricallly chosen
-        cropped_img = grey_img.crop((left, top, right, bottom)) # cropped image of above dimension
-        resized_img = cropped_img.resize((84, 84))
-        array_2d = np.asarray(resized_img)
-        array_3d = np.expand_dims(array_2d, axis=0)
+        array_3d = grey_crop_resize(i)
         array_4d = np.expand_dims(array_3d, axis=0)
         states.append(array_4d)
     states_array = np.vstack(states) # turn the stack into array
