@@ -8,6 +8,7 @@ import torchvision
 import numpy as np
 import gymnasium as gym
 import argparse
+from PIL import Image
 
 
 # good: https://hrl.boyuai.com/chapter/2/ppo%E7%AE%97%E6%B3%95/
@@ -17,15 +18,15 @@ import argparse
 NUM_ENVS = 8
 EP_MAX = 20000
 EP_LEN = 256
-K_EPOCHS = 8
+K_EPOCHS = 10
 GAMMA = 0.99
 EPS_CLIP = 0.2
 LR_A = 1e-4
 LR_C = 1e-4
-BATCH_SIZE = 512
+BATCH_SIZE = 64
 
 model_dir = 'models'
-model = 'ppo_pong.diff'
+model = 'ppo_pong'
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -93,23 +94,48 @@ class ActorCritic(nn.Module):
 
     def __init__(self, input_shape, output_dim):
         super(ActorCritic, self).__init__()
-        N = 80 * 80
         # self.feature = nn.Sequential(
         #     nn.Linear(N, 200),
         #     nn.ReLU(inplace=True),
         # )
         # self.feature = nn.Flatten()
-        self.actor = nn.Sequential(
-            nn.Linear(N, 200),
-            nn.ReLU(inplace=True),
-            nn.Linear(200, output_dim),
-            nn.Softmax(dim=-1),
+
+        self.critic = nn.Sequential(  # The “Critic” estimates the value function
+            nn.Conv2d(in_channels=1, out_channels=16, kernel_size=8, stride=4),
+            nn.ReLU(),
+            nn.Conv2d(in_channels=16, out_channels=32, kernel_size=4, stride=2),
+            nn.ReLU(),
+            nn.Flatten(),
+            nn.Linear(in_features=2592, out_features=256),
+            nn.ReLU(),
+            nn.Linear(in_features=256, out_features=1),
         )
-        self.critic = nn.Sequential(
-            nn.Linear(N, 200),
-            nn.ReLU(inplace=True),
-            nn.Linear(200, 1),
+        self.actor = nn.Sequential(  # The “Actor” updates the policy distribution in the direction suggested by the Critic (such as with policy gradients)
+            nn.Conv2d(in_channels=1, out_channels=16, kernel_size=8, stride=4),
+            nn.ReLU(),
+            nn.Conv2d(in_channels=16, out_channels=32, kernel_size=4, stride=2),
+            nn.ReLU(),
+            nn.Flatten(),
+            nn.Linear(in_features=2592, out_features=256),
+            nn.ReLU(),
+            nn.Linear(in_features=256, out_features=output_dim),
+            nn.Softmax(dim=1),
         )
+
+        # N = 84 * 84
+        # self.actor = nn.Sequential(
+        #     nn.Flatten(),
+        #     nn.Linear(N, 200),
+        #     nn.ReLU(),
+        #     nn.Linear(200, output_dim),
+        #     nn.Softmax(dim=-1),
+        # )
+        # self.critic = nn.Sequential(
+        #     nn.Flatten(),
+        #     nn.Linear(N, 200),
+        #     nn.ReLU(),
+        #     nn.Linear(200, 1),
+        # )
 
     # def forward(self, x):
         # action_probs = torch.softmax(self.actor(x), dim=-1)
@@ -214,13 +240,16 @@ class PPO:
         return state_value.cpu().item()
 
     def discounted_rewards(self):
+        values = self.buffer.state_values + [0.0]
         returns = []
         running_returns = 0
+        gae = 0
         for t in reversed(range(len(self.buffer.rewards))):
-            if self.buffer.rewards[t] in (-1, 1):
-                running_returns = 0
-            running_returns = self.buffer.rewards[t] + self.gamma * running_returns * (1.0 - self.buffer.dones[t])
-            returns.append(running_returns)
+            # if self.buffer.rewards[t] in (-1, 1):
+            #     running_returns = 0
+            delta = self.buffer.rewards[t] + self.gamma * values[t + 1] * (1.0 - self.buffer.dones[t]) - values[t]
+            gae = delta + self.gamma * 0.95 * gae * (1.0 - self.buffer.dones[t])
+            returns.append(gae + values[t])
         returns.reverse()
         return [torch.tensor(item) for item in returns]
 
@@ -240,7 +269,7 @@ class PPO:
             data_loader = self.buffer.make_batch()
             for batch in data_loader:
                 batch = [item.to(device) for item in batch]
-                if len(batch[0]) == 1:
+                if not data_loader.drop_last and len(batch[0]) == 1:
                     # advantage.std() will be nan
                     break
                 loss, actor_loss, critic_loss, entropy_loss = self.loss_single_batch(*batch)
@@ -248,14 +277,15 @@ class PPO:
                 epoch_actor_loss += actor_loss
                 epoch_critic_loss += critic_loss
                 epoch_entropy_loss += entropy_loss
-            # Optimize the model
+
+                self.optimizer.zero_grad()
+                (loss / batch[0].shape[0]).backward()
+                self.optimizer.step()
+
             epoch_loss = epoch_loss / len(data_loader.dataset)
             epoch_actor_loss = epoch_actor_loss / len(data_loader.dataset)
             epoch_critic_loss = epoch_critic_loss / len(data_loader.dataset)
             epoch_entropy_loss = epoch_entropy_loss / len(data_loader.dataset)
-            self.optimizer.zero_grad()
-            epoch_loss.backward()
-            self.optimizer.step()
 
         return epoch_loss, epoch_actor_loss, epoch_critic_loss, epoch_entropy_loss
 
@@ -267,13 +297,14 @@ class PPO:
 
         # Calculate advantage
         advantages = (d_rewards - state_values).detach()
-        advantages_norm = (advantages - advantages.mean()) / (advantages.std() + 1e-7)
+        # advantages_norm = (advantages - advantages.mean()) / (advantages.std() + 1e-7)
 
         surr1 = ratios * advantages
         surr2 = torch.clamp(ratios, 1 - self.eps_clip, 1 + self.eps_clip) * advantages
 
         actor_loss = -torch.min(surr1, surr2).sum()
-        critic_loss = F.mse_loss(state_values, d_rewards, reduction="sum")
+        # critic_loss = F.mse_loss(state_values, d_rewards, reduction="sum")
+        critic_loss = 0.5 * (state_values - d_rewards).pow(2).sum()
         entropy_loss = -0.01 * dist_entropy.sum()
         loss = actor_loss + critic_loss + entropy_loss
         return loss, actor_loss, critic_loss, entropy_loss
@@ -302,7 +333,21 @@ def preprocess(prev, curr):
     x1 = img.astype(np.float32)
 
     diff = ((x2 - x1) + 1.0) / 2.0
-    return diff.ravel()
+    return diff
+
+def grey_crop_resize(state): # deal with single observation
+    img = Image.fromarray(state)
+    grey_img = img.convert(mode='L')
+    left = 0
+    top = 35  # empirically chosen
+    right = 160
+    bottom = 195  # empirically chosen
+    cropped_img = grey_img.crop((left, top, right, bottom))
+    resized_img = cropped_img.resize((84, 84))
+    array_2d = np.asarray(resized_img)
+    array_3d = np.expand_dims(array_2d, axis=0)
+    return array_3d / 255. # C*H*W
+
 
 # Training loop
 def train(num_epochs, load_from=None, eval=False):
@@ -335,7 +380,8 @@ def train(num_epochs, load_from=None, eval=False):
 
     for epoch in range(start_epoch, num_epochs):
         curr_frame, _ = env.reset()
-        state = preprocess(None, curr_frame)
+        # state = preprocess(None, curr_frame)
+        state = grey_crop_resize(curr_frame)
         total_reward = 0
         step = 0
         ppo_agent.buffer.clear()
@@ -345,7 +391,9 @@ def train(num_epochs, load_from=None, eval=False):
 
             action = ppo_agent.select_action(state, store=not eval)
             next_frame, reward, done, _, _ = env.step(action)
-            next_state = preprocess(curr_frame, next_frame)
+            # next_state = preprocess(curr_frame, next_frame)
+            next_state = grey_crop_resize(next_frame)
+
             if not eval:
                 ppo_agent.add_buffer(reward, done)
 
