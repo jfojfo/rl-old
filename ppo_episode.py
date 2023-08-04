@@ -421,12 +421,13 @@ def train(num_epochs, load_from=None, eval=False):
         writer.add_scalar('Reward', total_reward, total_steps)
 
         if (epoch + 1) % 100 == 0 and not eval:
+            name = "%s_%s_%+.1f_%d.pth" % (MODEL, ENV_ID, total_reward, epoch + 1)
             torch.save({
                 'state_dict': ppo_agent.policy.state_dict(),
                 'optimizer_state_dict': ppo_agent.optimizer.state_dict(),
                 'epoch': epoch + 1,
                 'total_steps': total_steps,
-            }, f'{MODEL_DIR}/{MODEL}.{epoch + 1}.pth')
+            }, f'{MODEL_DIR}/{name}')
 
     env.close()
 
