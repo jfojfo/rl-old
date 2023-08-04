@@ -25,8 +25,10 @@ LR_A = 1e-4
 LR_C = 1e-4
 BATCH_SIZE = 64
 
-model_dir = 'models'
-model = 'ppo_pong'
+MODEL_DIR = 'models'
+MODEL = 'ppo_episode'
+ENV_ID = 'PongDeterministic-v0'
+
 
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
@@ -353,7 +355,7 @@ def grey_crop_resize(state): # deal with single observation
 def train(num_epochs, load_from=None, eval=False):
     render_mode = 'human' if eval else 'rgb_array'
     # PongDeterministic-v0
-    env = gym.make('PongDeterministic-v0', render_mode=render_mode)
+    env = gym.make(ENV_ID, render_mode=render_mode)
     input_shape = env.observation_space.shape
     output_dim = env.action_space.n
     ppo_agent = PPO(input_shape, output_dim, lr_a=LR_A, lr_c=LR_C, gamma=GAMMA, K_epochs=K_EPOCHS, eps_clip=EPS_CLIP, batch_size=BATCH_SIZE)
@@ -364,7 +366,7 @@ def train(num_epochs, load_from=None, eval=False):
         ppo_agent.policy.eval()
         ppo_agent.policy_old.eval()
 
-    writer = SummaryWriter()
+    writer = SummaryWriter(comment=f'.{MODEL}.{ENV_ID}')
 
     start_epoch = 0
     total_steps = 0
@@ -424,7 +426,7 @@ def train(num_epochs, load_from=None, eval=False):
                 'optimizer_state_dict': ppo_agent.optimizer.state_dict(),
                 'epoch': epoch + 1,
                 'total_steps': total_steps,
-            }, f'{model_dir}/{model}.{epoch + 1}.pth')
+            }, f'{MODEL_DIR}/{MODEL}.{epoch + 1}.pth')
 
     env.close()
 
