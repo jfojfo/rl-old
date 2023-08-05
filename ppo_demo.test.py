@@ -33,7 +33,7 @@ TARGET_REWARD = 20
 TRANSFER_LEARNING = False
 
 MODEL_DIR = 'models'
-MODEL = 'ppo_demo.norm_img_lr0.0001'
+MODEL = 'ppo_demo.test'
 # ENV_ID = 'Pong-v0'
 ENV_ID = 'PongDeterministic-v0'
 
