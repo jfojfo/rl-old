@@ -32,9 +32,7 @@ demo diff版，没想象中效果好，是否与VecENv done之后返回下一局
 
 * ppo_episode：成功，PongDeterministic-v0，img/255.0，lr=1e-4，未做normalize advantage，得分在10~20
 * ppo_episode.single_round：半失败，PongDeterministic-v0，img/255.0，lr=1e-4，未做normalize，起步快，但逐渐落后，最终得分10分左右，比ppo_episode低
-* ppo_episode.reward_as_return.PongDeterministic-v0：失败，将rewards*gamma后，直接作为returns
-* ppo_episode.reward_as_return.norm_advatage.PongDeterministic-v0：失败，将rewards*gamma作为returns，normalize advantage
-* ppo_episode.single_round.norm_advatage.PongDeterministic-v0：成功，起步慢，reward=-1或1时就认为done了，normalize advantage，得分与ppo_episode差不多，后期甚至平均略高一点点
-点击
-
+* ppo_episode.reward_as_return.PongDeterministic-v0：失败，img/255.0，lr=1e-4，将rewards*gamma后，直接作为returns
+* ppo_episode.reward_as_return.norm_advatage.PongDeterministic-v0：失败，img/255.0，lr=1e-4，将rewards*gamma作为returns，normalize advantage
+* ppo_episode.single_round.norm_advatage.PongDeterministic-v0：成功，起步慢，img/255.0，lr=1e-4，reward=-1或1时就认为done了，normalize advantage，得分与ppo_episode差不多，后期甚至平均略高一点点
 
