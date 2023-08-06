@@ -37,7 +37,7 @@ TRANSFER_LEARNING = False
 LATENT_DIM = 10
 
 MODEL_DIR = 'models'
-MODEL = 'ppo_demo.vae'
+MODEL = 'ppo_demo.vae_care_for_batchnorm'
 # ENV_ID = 'Pong-v0'
 ENV_ID = 'PongDeterministic-v0'
 
@@ -66,6 +66,7 @@ class CNN(nn.Module):
             nn.ReLU(),
             nn.Unflatten(1, (32, 9, 9)),
             nn.ConvTranspose2d(32, 16, kernel_size=4, stride=2),
+            nn.BatchNorm2d(16),
             nn.ReLU(),
             nn.ConvTranspose2d(16, 1, kernel_size=8, stride=4),
             nn.Sigmoid()
@@ -258,7 +259,9 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
         writer.add_scalar('Loss/Recon Loss', recon_loss.item(), total_steps)
 
         if train_epoch % T_EPOCHS == 0:  # do a test every T_EPOCHS times
+            model.eval()
             test_reward = np.mean([test_env(env_test, model, device) for _ in range(N_TESTS)])  # do N_TESTS tests and takes the mean reward
+            model.train()
             test_rewards.append(test_reward)  # collect the mean rewards for saving performance metric
             test_epochs.append(train_epoch)
             print('Epoch: %s -> Reward: %s' % (train_epoch, test_reward))
@@ -330,6 +333,7 @@ def eval(load_from):
     num_inputs = 1
     num_outputs = env_test.action_space.n
     model = CNN(num_inputs, num_outputs, H_SIZE).to(device)
+    model.eval()
 
     checkpoint = torch.load(load_from, map_location=None if use_cuda else torch.device('cpu'))
     model.load_state_dict(checkpoint['state_dict'])
