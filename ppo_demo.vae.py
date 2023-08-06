@@ -183,7 +183,7 @@ def test_env(env, model, device):
     total_reward = 0
     while not done:
         state = torch.FloatTensor(state).unsqueeze(0).to(device)
-        dist, _ = model(state)
+        dist, _, _ = model(state)
         action = dist.sample().cpu().numpy()[0]
         next_state, reward, done, _, _ = env.step(action)
         next_state = grey_crop_resize(next_state)
