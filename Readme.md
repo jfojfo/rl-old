@@ -25,6 +25,7 @@ demo diff版，没想象中效果好，是否与VecENv done之后返回下一局
 * ppo_demo.single_round.lr3e-5.K=5.PongDeterministic-v0：失败，reward=-1或1时就认为done了，lr3e-5，K=5
 * ppo_demo.img255.K=1.lr=1e-4.PongDeterministic-v0：失败，不做img/255.0，K=1，lr=1e-4
 * ppo_demo.diff.PongDeterministic-v0：成功，img/255.0，lr=1e-4，且前后frame做diff，起步刚开始超过了ppo_demo_deterministic一点，但又掉下去导致落后，得分差不多
+* ppo_demo.same_img_feature.PongDeterministic-v0：成功，img/255.0，lr=1e-4，actor、critic共享Conv层feature，由于参数变少，起步比ppo_demo.norm_img_lr0.0001.PongDeterministic-v0快
 
 # ppo_episode
 1个env跑，每次episode done后开始训练，参考demo版的image处理、GAE(Generalized Advantage Estimates) rewards处理
