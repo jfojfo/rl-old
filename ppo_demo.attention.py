@@ -26,7 +26,7 @@ E_CLIP = 0.2 # clipping coefficient
 C_1 = 0.5 # squared loss coefficient
 C_2 = 0.01 # entropy coefficient
 C_3 = 0.1 # image reconstruction loss coefficient
-N = 2 # simultaneous processing environments
+N = 8 # simultaneous processing environments
 T = 256 # PPO steps to get envs data
 M = 64 # mini batch size
 K = 10 # PPO epochs repeated to optimise
@@ -38,7 +38,7 @@ EMBED_DIM = H_SIZE
 LOOK_BACK_SIZE = 256
 
 MODEL_DIR = 'models'
-MODEL = 'ppo_demo.attention'
+MODEL = 'ppo_demo.attention_test'
 # ENV_ID = 'Pong-v0'
 ENV_ID = 'PongDeterministic-v0'
 
@@ -215,19 +215,19 @@ def compute_gae(next_value, rewards, masks, values, gamma=G_GAE, lam=L_GAE):
     return returns
 
 
-def ppo_iter(states, actions, log_probs, returns, advantages, seq_features, seq_masks):
+def ppo_iter(states, actions, log_probs, returns, advantages, seq):
     batch_size = states.size(0)  # lenght of data collected
 
     for _ in range(batch_size // M):
         rand_ids = np.random.randint(0, batch_size, M)  # integer array of random indices for selecting M mini batches
-        reverse_ids = flip_seq_idx(rand_ids)
-        seq = fetch_seq(seq_features, reverse_ids, seq_masks)
-        yield states[rand_ids, :], actions[rand_ids, :], log_probs[rand_ids, :], returns[rand_ids, :], advantages[rand_ids, :], seq
+        reverse_ids = seq.flip_seq_idx(rand_ids)
+        seq_features = seq.fetch_seq(reverse_ids).detach()
+        yield states[rand_ids, :], actions[rand_ids, :], log_probs[rand_ids, :], returns[rand_ids, :], advantages[rand_ids, :], seq_features
 
 
-def ppo_update(model, optimizer, states, actions, log_probs, returns, advantages, seq_features, seq_masks, clip_param=E_CLIP):
+def ppo_update(model, optimizer, states, actions, log_probs, returns, advantages, seq, clip_param=E_CLIP):
     for _ in range(K):
-        for state, action, old_log_probs, return_, advantage, seq_feature in ppo_iter(states, actions, log_probs, returns, advantages, seq_features, seq_masks):
+        for state, action, old_log_probs, return_, advantage, seq_feature in ppo_iter(states, actions, log_probs, returns, advantages, seq):
             dist, value, _ = model(state, seq_feature)
             action = action.reshape(1, len(action)) # take the relative action and take the column
             new_log_probs = dist.log_prob(action)
@@ -245,47 +245,64 @@ def ppo_update(model, optimizer, states, actions, log_probs, returns, advantages
     return loss, actor_loss, critic_loss, entropy_loss
 
 
-def flip_seq_idx(idx):
-    seq_idx = (T - 1 - idx // N) * N + idx % N  # invert index, when N=2, [509, 511] should select [3,1] index
-    return seq_idx
+class Seq:
+    def __init__(self, seq_len=LOOK_BACK_SIZE, batch_size=N, rolling_size=T, feature_size=EMBED_DIM, device='cpu'):
+        self.seq_len = seq_len
+        self.batch_size = batch_size
+        self.rolling_size = rolling_size
+        self.seq_features = torch.zeros((seq_len + rolling_size) * batch_size, feature_size).to(device)
+        self.seq_masks = torch.zeros(rolling_size * batch_size, 1).to(device)
 
-def fetch_seq(seq, idx, mask):
-    # reverse_mask = None if mask is None else torch.flip(mask.view(T, N, -1), dims=[0]).view(T * N, -1)
-    results = []
-    for start in idx:
-        # indices = torch.arange(start, start + LOOK_BACK_SIZE * N, N)
-        # d = torch.index_select(seq, 0, indices)
-        d = seq[start:start + LOOK_BACK_SIZE * N:N] * 1  # will make a new tensor
-        # mask_value, _ = torch.cummin(reverse_mask[start::N], dim=0)
-        # results.append(d * mask_value)
+    def flip_seq_idx(self, idx):
+        seq_idx = (self.rolling_size - 1 - idx // self.batch_size) * self.batch_size + idx % self.batch_size  # invert index, when N=2, [509, 511] should select [3,1] index
+        return seq_idx
 
-        i = torch.arange(start, mask.shape[0], N)
-        is_zero = (mask[i, 0] == 0)
-        non_zero_pos = is_zero.nonzero()
-        if non_zero_pos.shape[0] > 0:
-            first_zero_index = non_zero_pos.min()
-            d[first_zero_index:] = 0  # d is a new tensor, no modification to seq
-        results.append(d.unsqueeze(dim=1))
-    sub_seq = torch.cat(results, dim=1)
-    return sub_seq
+    def fetch_seq(self, idx):
+        seq = self.seq_features
+        mask = self.seq_masks
+        # reverse_mask = None if mask is None else torch.flip(mask.view(T, N, -1), dims=[0]).view(T * N, -1)
+        results = []
+        for start in idx:
+            # indices = torch.arange(start, start + LOOK_BACK_SIZE * N, N)
+            # d = torch.index_select(seq, 0, indices)
+            d = seq[start:start + self.seq_len * self.batch_size:self.batch_size] * 1  # will make a new tensor
+            # mask_value, _ = torch.cummin(reverse_mask[start::N], dim=0)
+            # results.append(d * mask_value)
 
-def roll_seq(seq, data, order=0):
-    if order == -1:
-        start = data.shape[0]
-        end = seq.shape[0]
-        seq = torch.cat((seq[start:end], data), dim=0)
-    else:
-        start = 0
-        end = seq.shape[0] - data.shape[0]
-        seq = torch.cat((data, seq[start:end]), dim=0)
-    return seq
+            i = torch.arange(start, mask.shape[0], self.batch_size)
+            is_zero = (mask[i, 0] == 0)
+            non_zero_pos = is_zero.nonzero()
+            if non_zero_pos.shape[0] > 0:
+                first_zero_index = non_zero_pos.min()
+                d[first_zero_index:] = 0  # d is a new tensor, no modification to seq
+            results.append(d.unsqueeze(dim=1))
+        sub_seq = torch.cat(results, dim=1)
+        return sub_seq
 
-def mask_last_epoch(seq, last_mask):
-    if last_mask is not None:
-        mask = last_mask.view(-1, N, 1)
-        cum_mask, _ = mask.cummin(dim=0)
-        cum_mask = cum_mask.view(-1, 1)
-        seq[:cum_mask.shape[0]] *= cum_mask  # modify seq inplace
+    def _roll_seq(self, seq, data, order=0):
+        if order == -1:
+            start = data.shape[0]
+            end = seq.shape[0]
+            seq = torch.cat((seq[start:end], data), dim=0)
+        else:
+            start = 0
+            end = seq.shape[0] - data.shape[0]
+            seq = torch.cat((data, seq[start:end]), dim=0)
+        return seq
+
+    def roll_seq_feature(self, data):
+        self.seq_features = self._roll_seq(self.seq_features, data)
+
+    def roll_seq_mask(self, data):
+        self.seq_masks = self._roll_seq(self.seq_masks, data)
+
+    def mask_last_epoch(self, last_mask):
+        seq = self.seq_features
+        if last_mask is not None:
+            mask = last_mask.view(-1, self.batch_size, 1)
+            cum_mask, _ = mask.cummin(dim=0)
+            cum_mask = cum_mask.view(-1, 1)
+            seq[self.rolling_size:self.rolling_size + cum_mask.shape[0]] *= cum_mask  # modify seq inplace
 
 def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_epoch, best_reward, early_stop=False):
     writer = SummaryWriter(comment=f'.{MODEL}.{ENV_ID}')
@@ -298,8 +315,7 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
     total_runs_1_env = 0
     steps_1_env = 0
 
-    seq_features = torch.zeros(LOOK_BACK_SIZE * 2 * N, EMBED_DIM).to(device)
-    seq_masks = torch.zeros(LOOK_BACK_SIZE * N, 1).to(device)
+    seq = Seq(seq_len=LOOK_BACK_SIZE, batch_size=N, rolling_size=T, feature_size=EMBED_DIM, device=device)
     fixed_idx = np.asarray([j for j in range(N)])
     last_seq_masks = None
 
@@ -313,7 +329,7 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
 
         for i in range(T):
             state = torch.FloatTensor(state).to(device)
-            dist, value, feature = model(state, fetch_seq(seq_features, fixed_idx, seq_masks))
+            dist, value, feature = model(state, seq.fetch_seq(fixed_idx))
             action = dist.sample().to(device)
             next_state, reward, done, _ = envs.step(action.cpu().numpy())
             next_state = grey_crop_resize_batch(next_state)  # simplify perceptions (grayscale-> crop-> resize) to train CNN
@@ -327,8 +343,8 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
             masks.append(torch.FloatTensor(1 - done).unsqueeze(1).to(device))
             states.append(state)
             state = next_state
-            seq_features = roll_seq(seq_features, feature)
-            seq_masks = roll_seq(seq_masks, masks[-1])
+            seq.roll_seq_feature(feature)
+            seq.roll_seq_mask(masks[-1])
 
             total_reward_1_env += reward[0]
             steps_1_env += 1
@@ -339,11 +355,11 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
                 total_reward_1_env = 0
                 steps_1_env = 0
 
-        mask_last_epoch(seq_features, last_seq_masks)
-        last_seq_masks = seq_masks
+        seq.mask_last_epoch(last_seq_masks)
+        last_seq_masks = seq.seq_masks.clone()
 
         next_state = torch.FloatTensor(next_state).to(device)  # consider last state of the collection step
-        _, next_value, _ = model(next_state, fetch_seq(seq_features, fixed_idx, seq_masks))  # collect last value effect of the last collection step
+        _, next_value, _ = model(next_state, seq.fetch_seq(fixed_idx))  # collect last value effect of the last collection step
         returns = compute_gae(next_value, rewards, masks, values)
         returns = torch.cat(returns).detach()  # concatenates along existing dimension and detach the tensor from the network graph, making the tensor no gradient
         log_probs = torch.cat(log_probs).detach()
@@ -352,9 +368,8 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
         actions = torch.cat(actions)
         advantages = returns - values  # compute advantage for each action
         advantages = normalize(advantages)  # compute the normalization of the vector to make uniform values
-        seq_features = seq_features.detach()
         loss, actor_loss, critic_loss, entropy_loss = ppo_update(
-            model, optimizer, states, actions, log_probs, returns, advantages, seq_features, seq_masks)
+            model, optimizer, states, actions, log_probs, returns, advantages, seq)
         train_epoch += 1
 
         total_steps = train_epoch * T
@@ -434,14 +449,24 @@ def test_env(env, model, device):
 
     done = False
     total_reward = 0
+
+    seq = Seq(seq_len=LOOK_BACK_SIZE, batch_size=1, rolling_size=LOOK_BACK_SIZE, feature_size=EMBED_DIM, device=device)
+    fixed_idx = np.asarray([j for j in range(1)])
+
     while not done:
         state = torch.FloatTensor(state).unsqueeze(0).to(device)
-        dist, _, _ = model(state)
+        dist, _, feature = model(state, seq.fetch_seq(fixed_idx))
         action = dist.sample().cpu().numpy()[0]
         next_state, reward, done, _, _ = env.step(action)
         next_state = grey_crop_resize(next_state)
         state = next_state
         total_reward += reward
+
+        done = np.asarray([done])
+        mask = torch.FloatTensor(1 - done).unsqueeze(1).to(device)
+        seq.roll_seq_feature(feature)
+        seq.roll_seq_mask(mask)
+
     return total_reward
 
 
