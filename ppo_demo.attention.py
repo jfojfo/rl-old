@@ -30,7 +30,7 @@ N = 8 # simultaneous processing environments
 T = 256 # PPO steps to get envs data
 M = 64 # mini batch size
 K = 10 # PPO epochs repeated to optimise
-T_EPOCHS = 100 # T_EPOCH to test and save
+T_EPOCHS = 50 # T_EPOCH to test and save
 N_TESTS = 10 # do N_TESTS tests
 TARGET_REWARD = 20
 TRANSFER_LEARNING = False
@@ -174,78 +174,7 @@ class ActorCritic(nn.Module):
         return dist, value, feature
 
 
-def normalize(x):
-    x -= x.mean()
-    x /= (x.std() + 1e-8) # prevent 0 fraction
-    return x
-
-
-def grey_crop_resize_batch(state):  # deal with batch observations
-    states = []
-    for i in state:
-        array_3d = grey_crop_resize(i)
-        array_4d = np.expand_dims(array_3d, axis=0)
-        states.append(array_4d)
-    states_array = np.vstack(states) # turn the stack into array
-    return states_array # B*C*H*W
-
-def grey_crop_resize(state): # deal with single observation
-    img = Image.fromarray(state)
-    grey_img = img.convert(mode='L')
-    left = 0
-    top = 34  # empirically chosen
-    right = 160
-    bottom = 194  # empirically chosen
-    cropped_img = grey_img.crop((left, top, right, bottom))
-    resized_img = cropped_img.resize((84, 84))
-    array_2d = np.asarray(resized_img)
-    array_3d = np.expand_dims(array_2d, axis=0)
-    return array_3d / 255. # C*H*W
-
-
-def compute_gae(next_value, rewards, masks, values, gamma=G_GAE, lam=L_GAE):
-    values = values + [next_value]  # concat last value to the list
-    gae = 0  # first gae always to 0
-    returns = []
-
-    for step in reversed(range(len(rewards))):  # for each positions with respect to the result of the action
-        delta = rewards[step] + gamma * values[step + 1] * masks[step] - values[step]  # compute delta, sum of current reward and the expected goodness of the next state (next state val minus current state val), zero if 'done' is reached, so i can't consider next val
-        gae = delta + gamma * lam * masks[step] * gae  # recursively compute the sum of the gae until last state is reached, gae is computed summing all gae of previous actions, higher is multiple good actions succeds, lower otherwhise
-        returns.insert(0, gae + values[step])  # sum again the value of current action, so a state is better to state in if next increment as well
-    return returns
-
-
-def ppo_iter(states, actions, log_probs, returns, advantages, seq):
-    batch_size = states.size(0)  # lenght of data collected
-
-    for _ in range(batch_size // M):
-        rand_ids = np.random.randint(0, batch_size, M)  # integer array of random indices for selecting M mini batches
-        reverse_ids = seq.flip_seq_idx(rand_ids)
-        seq_features = seq.fetch_seq(reverse_ids).detach()
-        yield states[rand_ids, :], actions[rand_ids, :], log_probs[rand_ids, :], returns[rand_ids, :], advantages[rand_ids, :], seq_features
-
-
-def ppo_update(model, optimizer, states, actions, log_probs, returns, advantages, seq, clip_param=E_CLIP):
-    for _ in range(K):
-        for state, action, old_log_probs, return_, advantage, seq_feature in ppo_iter(states, actions, log_probs, returns, advantages, seq):
-            dist, value, _ = model(state, seq_feature)
-            action = action.reshape(1, len(action)) # take the relative action and take the column
-            new_log_probs = dist.log_prob(action)
-            new_log_probs = new_log_probs.reshape(len(old_log_probs), 1) # take the column
-            ratio = (new_log_probs - old_log_probs).exp() # new_prob/old_prob
-            surr1 = ratio * advantage
-            surr2 = torch.clamp(ratio, 1.0 - clip_param, 1.0 + clip_param) * advantage
-            actor_loss = - torch.min(surr1, surr2).mean()
-            critic_loss = (return_ - value).pow(2).mean()
-            entropy_loss = -dist.entropy().mean()
-            loss = C_1 * critic_loss + actor_loss + C_2 * entropy_loss # loss function clip+vs+f
-            optimizer.zero_grad() # in PyTorch, we need to set the gradients to zero before starting to do backpropragation because PyTorch accumulates the gradients on subsequent backward passes.
-            loss.backward() # computes dloss/dx for every parameter x which has requires_grad=True. These are accumulated into x.grad for every parameter x
-            optimizer.step() # performs the parameters update based on the current gradient and the update rule
-    return loss, actor_loss, critic_loss, entropy_loss
-
-
-class Seq:
+class SeqTorch:
     def __init__(self, seq_len=LOOK_BACK_SIZE, batch_size=N, rolling_size=T, feature_size=EMBED_DIM, device='cpu'):
         self.seq_len = seq_len
         self.batch_size = batch_size
@@ -304,6 +233,130 @@ class Seq:
             cum_mask = cum_mask.view(-1, 1)
             seq[self.rolling_size:self.rolling_size + cum_mask.shape[0]] *= cum_mask  # modify seq inplace
 
+
+def normalize(x):
+    x -= x.mean()
+    x /= (x.std() + 1e-8) # prevent 0 fraction
+    return x
+
+
+def grey_crop_resize_batch(state):  # deal with batch observations
+    states = []
+    for i in state:
+        array_3d = grey_crop_resize(i)
+        array_4d = np.expand_dims(array_3d, axis=0)
+        states.append(array_4d)
+    states_array = np.vstack(states) # turn the stack into array
+    return states_array # B*C*H*W
+
+def grey_crop_resize(state): # deal with single observation
+    img = Image.fromarray(state)
+    grey_img = img.convert(mode='L')
+    left = 0
+    top = 34  # empirically chosen
+    right = 160
+    bottom = 194  # empirically chosen
+    cropped_img = grey_img.crop((left, top, right, bottom))
+    resized_img = cropped_img.resize((84, 84))
+    array_2d = np.asarray(resized_img)
+    array_3d = np.expand_dims(array_2d, axis=0)
+    return array_3d / 255. # C*H*W
+
+
+def compute_gae(next_value, rewards, masks, values, gamma=G_GAE, lam=L_GAE):
+    values = values + [next_value]  # concat last value to the list
+    gae = 0  # first gae always to 0
+    returns = []
+
+    for step in reversed(range(len(rewards))):  # for each positions with respect to the result of the action
+        delta = rewards[step] + gamma * values[step + 1] * masks[step] - values[step]  # compute delta, sum of current reward and the expected goodness of the next state (next state val minus current state val), zero if 'done' is reached, so i can't consider next val
+        gae = delta + gamma * lam * masks[step] * gae  # recursively compute the sum of the gae until last state is reached, gae is computed summing all gae of previous actions, higher is multiple good actions succeds, lower otherwhise
+        returns.insert(0, gae + values[step])  # sum again the value of current action, so a state is better to state in if next increment as well
+    return returns
+
+
+def ppo_iter(states, actions, log_probs, returns, advantages, seq, device):
+    batch_size = states.size(0)  # lenght of data collected
+
+    for _ in range(batch_size // M):
+        rand_ids = np.random.randint(0, batch_size, M)  # integer array of random indices for selecting M mini batches
+        reverse_ids = seq.flip_seq_idx(rand_ids)
+        seq_features = torch.from_numpy(seq.fetch_seq(reverse_ids)).to(device)
+        yield states[rand_ids, :], actions[rand_ids, :], log_probs[rand_ids, :], returns[rand_ids, :], advantages[rand_ids, :], seq_features
+
+
+def ppo_update(model, optimizer, states, actions, log_probs, returns, advantages, seq, device, clip_param=E_CLIP):
+    for _ in range(K):
+        for state, action, old_log_probs, return_, advantage, seq_feature in ppo_iter(states, actions, log_probs, returns, advantages, seq, device):
+            dist, value, _ = model(state, seq_feature)
+            action = action.reshape(1, len(action)) # take the relative action and take the column
+            new_log_probs = dist.log_prob(action)
+            new_log_probs = new_log_probs.reshape(len(old_log_probs), 1) # take the column
+            ratio = (new_log_probs - old_log_probs).exp() # new_prob/old_prob
+            surr1 = ratio * advantage
+            surr2 = torch.clamp(ratio, 1.0 - clip_param, 1.0 + clip_param) * advantage
+            actor_loss = - torch.min(surr1, surr2).mean()
+            critic_loss = (return_ - value).pow(2).mean()
+            entropy_loss = -dist.entropy().mean()
+            loss = C_1 * critic_loss + actor_loss + C_2 * entropy_loss # loss function clip+vs+f
+            optimizer.zero_grad() # in PyTorch, we need to set the gradients to zero before starting to do backpropragation because PyTorch accumulates the gradients on subsequent backward passes.
+            loss.backward() # computes dloss/dx for every parameter x which has requires_grad=True. These are accumulated into x.grad for every parameter x
+            optimizer.step() # performs the parameters update based on the current gradient and the update rule
+    return loss, actor_loss, critic_loss, entropy_loss
+
+
+class Seq:
+    def __init__(self, seq_len=LOOK_BACK_SIZE, batch_size=N, rolling_size=T, feature_size=EMBED_DIM, device='cpu'):
+        self.seq_len = seq_len
+        self.batch_size = batch_size
+        self.rolling_size = rolling_size
+        self.seq_features = np.zeros([(seq_len + rolling_size) * batch_size, feature_size], dtype=np.float32)
+        self.seq_masks = np.zeros([rolling_size * batch_size, 1], dtype=np.float32)
+
+    def flip_seq_idx(self, idx):
+        seq_idx = (self.rolling_size - 1 - idx // self.batch_size) * self.batch_size + idx % self.batch_size  # invert index, when N=2, [509, 511] should select [3,1] index
+        return seq_idx
+
+    def fetch_seq(self, idx):
+        seq = self.seq_features
+        mask = self.seq_masks
+        results = []
+        for start in idx:
+            d = seq[start:start + self.seq_len * self.batch_size:self.batch_size] * 1  # will make a new tensor
+            i = np.arange(start, mask.shape[0], self.batch_size)
+            is_zero = (mask[i, 0] == 0)
+            non_zero_pos = is_zero.nonzero()[0]
+            if non_zero_pos.shape[0] > 0:
+                first_zero_index = non_zero_pos.min()
+                d[first_zero_index:] = 0  # d is a new tensor, no modification to seq
+            results.append(d[:, np.newaxis, :])
+        sub_seq = np.concatenate(results, axis=1)
+        return sub_seq
+
+    def _roll_seq(self, seq, data, order=0):
+        n = data.shape[0]
+        if order == -1:
+            seq[:-n] = seq[n:]
+            seq[-n:] = data
+        else:
+            seq[n:] = seq[:-n]
+            seq[:n] = data
+
+    def roll_seq_feature(self, data):
+        self._roll_seq(self.seq_features, data)
+
+    def roll_seq_mask(self, data):
+        self._roll_seq(self.seq_masks, data)
+
+    def mask_last_epoch(self, last_mask):
+        seq = self.seq_features
+        if last_mask is not None:
+            mask = last_mask.reshape(-1, self.batch_size, 1)
+            cum_mask = np.minimum.accumulate(mask, axis=0)
+            cum_mask = cum_mask.reshape(-1, 1)
+            offset = self.rolling_size * self.batch_size
+            seq[offset:offset + cum_mask.shape[0]] *= cum_mask  # modify seq inplace
+
 def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_epoch, best_reward, early_stop=False):
     writer = SummaryWriter(comment=f'.{MODEL}.{ENV_ID}')
     env_test = gym.make(ENV_ID, render_mode='rgb_array')
@@ -329,7 +382,7 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
 
         for i in range(T):
             state = torch.FloatTensor(state).to(device)
-            dist, value, feature = model(state, seq.fetch_seq(fixed_idx))
+            dist, value, feature = model(state, torch.from_numpy(seq.fetch_seq(fixed_idx)).to(device))
             action = dist.sample().to(device)
             next_state, reward, done, _ = envs.step(action.cpu().numpy())
             next_state = grey_crop_resize_batch(next_state)  # simplify perceptions (grayscale-> crop-> resize) to train CNN
@@ -343,8 +396,8 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
             masks.append(torch.FloatTensor(1 - done).unsqueeze(1).to(device))
             states.append(state)
             state = next_state
-            seq.roll_seq_feature(feature)
-            seq.roll_seq_mask(masks[-1])
+            seq.roll_seq_feature(feature.detach().cpu().numpy())
+            seq.roll_seq_mask(1 - done[:, np.newaxis])
 
             total_reward_1_env += reward[0]
             steps_1_env += 1
@@ -356,10 +409,10 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
                 steps_1_env = 0
 
         seq.mask_last_epoch(last_seq_masks)
-        last_seq_masks = seq.seq_masks.clone()
+        last_seq_masks = seq.seq_masks.copy()
 
         next_state = torch.FloatTensor(next_state).to(device)  # consider last state of the collection step
-        _, next_value, _ = model(next_state, seq.fetch_seq(fixed_idx))  # collect last value effect of the last collection step
+        _, next_value, _ = model(next_state, torch.from_numpy(seq.fetch_seq(fixed_idx)).to(device))  # collect last value effect of the last collection step
         returns = compute_gae(next_value, rewards, masks, values)
         returns = torch.cat(returns).detach()  # concatenates along existing dimension and detach the tensor from the network graph, making the tensor no gradient
         log_probs = torch.cat(log_probs).detach()
@@ -369,7 +422,7 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
         advantages = returns - values  # compute advantage for each action
         advantages = normalize(advantages)  # compute the normalization of the vector to make uniform values
         loss, actor_loss, critic_loss, entropy_loss = ppo_update(
-            model, optimizer, states, actions, log_probs, returns, advantages, seq)
+            model, optimizer, states, actions, log_probs, returns, advantages, seq, device)
         train_epoch += 1
 
         total_steps = train_epoch * T
@@ -455,7 +508,7 @@ def test_env(env, model, device):
 
     while not done:
         state = torch.FloatTensor(state).unsqueeze(0).to(device)
-        dist, _, feature = model(state, seq.fetch_seq(fixed_idx))
+        dist, _, feature = model(state, torch.from_numpy(seq.fetch_seq(fixed_idx)).to(device))
         action = dist.sample().cpu().numpy()[0]
         next_state, reward, done, _, _ = env.step(action)
         next_state = grey_crop_resize(next_state)
@@ -463,8 +516,8 @@ def test_env(env, model, device):
         total_reward += reward
 
         done = np.asarray([done])
-        mask = torch.FloatTensor(1 - done).unsqueeze(1).to(device)
-        seq.roll_seq_feature(feature)
+        mask = 1 - done[:, np.newaxis]
+        seq.roll_seq_feature(feature.detach().cpu().numpy())
         seq.roll_seq_mask(mask)
 
     return total_reward
