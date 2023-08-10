@@ -355,7 +355,8 @@ class Seq:
             cum_mask = np.minimum.accumulate(mask, axis=0)
             cum_mask = cum_mask.reshape(-1, 1)
             offset = self.rolling_size * self.batch_size
-            seq[offset:offset + cum_mask.shape[0]] *= cum_mask  # modify seq inplace
+            size = min(seq.shape[0] - offset, cum_mask.shape[0])  # when look back size < rolling size
+            seq[offset:offset + size] *= cum_mask[:size]  # modify seq inplace
 
 def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_epoch, best_reward, early_stop=False):
     writer = SummaryWriter(comment=f'.{MODEL}.{ENV_ID}')
