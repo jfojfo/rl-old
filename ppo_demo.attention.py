@@ -11,6 +11,7 @@ from stable_baselines3.common.vec_env import VecVideoRecorder, SubprocVecEnv
 import argparse
 from torchinfo import summary
 import torch.nn.functional as F
+import time
 
 
 #
@@ -125,8 +126,7 @@ class MyTransformerEncoderLayer(nn.Module):
         :return: # [src_len, batch_size, num_heads * kdim] <==> [src_len,batch_size,embed_dim]
         """
         src = query
-        src2 = self.self_attn(query, key, value, attn_mask=src_mask,
-                              key_padding_mask=src_key_padding_mask, )[0]  # 计算多头注意力
+        src2, w = self.self_attn(query, key, value, attn_mask=src_mask, key_padding_mask=src_key_padding_mask, )  # 计算多头注意力
         # src2: [src_len,batch_size,num_heads*kdim] num_heads*kdim = embed_dim
         src = src + self.dropout1(src2)  # 残差连接
         src = self.norm1(src)  # [src_len,batch_size,num_heads*kdim]
@@ -135,7 +135,7 @@ class MyTransformerEncoderLayer(nn.Module):
         src2 = self.linear2(self.dropout(src2))  # [src_len,batch_size,num_heads*kdim]
         src = src + self.dropout2(src2)
         src = self.norm2(src)
-        return src  # [src_len, batch_size, num_heads * kdim] <==> [src_len,batch_size,embed_dim]
+        return src, w  # [src_len, batch_size, num_heads * kdim] <==> [src_len,batch_size,embed_dim]
 
 
 class ActorCritic(nn.Module):
@@ -170,7 +170,7 @@ class ActorCritic(nn.Module):
     def forward(self, x, memory, mask=None):
         feature = self.feature(x)
         query = feature.unsqueeze(dim=0) # sequence first
-        attention = self.attention(query, memory, memory, src_key_padding_mask=mask)
+        attention, scores = self.attention(query, memory, memory, src_key_padding_mask=mask)
         attn_out = attention.squeeze(dim=0)
         value = self.critic(attn_out)
         probs = self.actor(attn_out)
