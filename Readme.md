@@ -1,5 +1,6 @@
 # 总结
-不论是demo版还是episode版，single round居然起步慢，这是没想到的，demo版还直接失败(收敛慢，得分0左右停止训练了)；
+不论是demo版还是episode版，single round(reward=-1或1时就认为done了)居然起步慢，这是没想到的，
+demo版还直接失败(收敛慢，得分0左右停止训练了)，single round结束时己方球拍实际上是可以上下移动的，不会重置到中间位置，所以重置为done不合理；
 
 demo版，img不除以255，比img/255.0的起步速度快；
 
@@ -8,7 +9,6 @@ demo版，img/255.0后，lr=1e-4只比原值x10倍，调到2.5e-4、5e-4都失�
 demo版，gae、norm都很重要，相比下gae又比norm更重要，它们比episode版影响更大；
 
 demo diff版，没想象中效果好，是否与VecENv done之后返回下一局开始有关，真正的结束frame可以在info['terminal_observation']获取；
-
 
 # ppo_demo
 8个env同时跑，demo版，原始code从github上下载
@@ -36,3 +36,18 @@ demo diff版，没想象中效果好，是否与VecENv done之后返回下一局
 * ppo_episode.reward_as_return.norm_advatage.PongDeterministic-v0：失败，img/255.0，lr=1e-4，将rewards*gamma作为returns，normalize advantage
 * ppo_episode.single_round.norm_advatage.PongDeterministic-v0：成功，起步慢，img/255.0，lr=1e-4，reward=-1或1时就认为done了，normalize advantage，得分与ppo_episode差不多，后期甚至平均略高一点点
 
+# ppo_demo.vae
+
+vae版
+
+ppo_demo.vae_recon_mean_kl_loss_c3_0.01.PongDeterministic-v0：reconstruction loss改为mean，c3、c4都调小为0.01，
+起步快，比ppo_demo基础版都快，中间能训练到20，但时间长了会掉落回-20，且波动大不稳定，test reward不及基础版
+
+# ppo_demo.attention
+
+attention版
+
+16起步比64快，后期64的test分高一些，且train得分波动小一些，两者在test时分数都有大幅下跌的情况
+
+* ppo_demo.attention_test.PongDeterministic-v0：look_back_size=16
+* ppo_demo.attention_test_64.PongDeterministic-v0：look_back_size=64
