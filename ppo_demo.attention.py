@@ -39,7 +39,7 @@ EMBED_DIM = H_SIZE
 LOOK_BACK_SIZE = 16
 
 MODEL_DIR = 'models'
-MODEL = 'ppo_demo.attention_test'
+MODEL = 'ppo_demo.attention_64'
 # ENV_ID = 'Pong-v0'
 ENV_ID = 'PongDeterministic-v0'
 
@@ -126,7 +126,7 @@ class MyTransformerEncoderLayer(nn.Module):
         :return: # [src_len, batch_size, num_heads * kdim] <==> [src_len,batch_size,embed_dim]
         """
         src = query
-        src2, w = self.self_attn(query, key, value, attn_mask=src_mask, key_padding_mask=src_key_padding_mask, )  # 计算多头注意力
+        src2, w = self.self_attn(query, key, value, attn_mask=src_mask, key_padding_mask=src_key_padding_mask)  # 计算多头注意力
         # src2: [src_len,batch_size,num_heads*kdim] num_heads*kdim = embed_dim
         src = src + self.dropout1(src2)  # 残差连接
         src = self.norm1(src)  # [src_len,batch_size,num_heads*kdim]
