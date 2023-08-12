@@ -18,8 +18,12 @@ import time
 # https://github.com/rossettisimone/PPO_PONG_DISCRETE/blob/master/PPO_PONG.ipynb
 #
 
+PATCH_H = 12
+PATCH_W = 12
+NUM_Y = 7
+NUM_X = 7
 
-H_SIZE = 128 # hidden size, linear units of the output layer
+H_SIZE = PATCH_H * PATCH_W * NUM_Y * NUM_X // 4 # hidden size, linear units of the output layer
 L_RATE = 1e-4 # learning rate, gradient coefficient for CNN weight update
 G_GAE = 0.99 # gamma param for GAE
 L_GAE = 0.95 # lambda param for GAE
@@ -35,11 +39,12 @@ T_EPOCHS = 50 # T_EPOCH to test and save
 N_TESTS = 10 # do N_TESTS tests
 TARGET_REWARD = 20
 TRANSFER_LEARNING = False
-EMBED_DIM = H_SIZE
-LOOK_BACK_SIZE = 16
+
+EMBED_DIM = PATCH_W * PATCH_H
+LOOK_BACK_SIZE = NUM_X * NUM_Y
 
 MODEL_DIR = 'models'
-MODEL = 'ppo_demo.attention_64'
+MODEL = 'ppo_demo.attention_seg_img'
 # ENV_ID = 'Pong-v0'
 ENV_ID = 'PongDeterministic-v0'
 
@@ -111,13 +116,13 @@ class MyTransformerEncoderLayer(nn.Module):
         self.dropout1 = nn.Dropout(dropout)
         self.norm1 = nn.LayerNorm(embed_dim)
 
-        self.linear1 = nn.Linear(embed_dim, dim_feedforward)
+        self.linear1 = nn.Linear(embed_dim // 4, dim_feedforward)
         self.dropout = nn.Dropout(dropout)
-        self.linear2 = nn.Linear(dim_feedforward, embed_dim)
+        self.linear2 = nn.Linear(dim_feedforward, embed_dim // 4)
         self.activation = F.relu
 
         self.dropout2 = nn.Dropout(dropout)
-        self.norm2 = nn.LayerNorm(embed_dim)
+        self.norm2 = nn.LayerNorm(embed_dim // 4)
 
     def forward(self, query, key, value, src_mask=None, src_key_padding_mask=None):
         """
@@ -131,6 +136,8 @@ class MyTransformerEncoderLayer(nn.Module):
         src = src + self.dropout1(src2)  # 残差连接
         src = self.norm1(src)  # [src_len,batch_size,num_heads*kdim]
 
+        src = src[:, :, 0:src.shape[2] // 4]
+
         src2 = self.activation(self.linear1(src))  # [src_len,batch_size,dim_feedforward]
         src2 = self.linear2(self.dropout(src2))  # [src_len,batch_size,num_heads*kdim]
         src = src + self.dropout2(src2)
@@ -141,17 +148,17 @@ class MyTransformerEncoderLayer(nn.Module):
 class ActorCritic(nn.Module):
     def __init__(self, num_inputs, num_outputs, hidden_size=H_SIZE, embed_dim=EMBED_DIM):
         super(ActorCritic, self).__init__()
-        self.feature = nn.Sequential(
-            nn.Conv2d(in_channels=num_inputs, out_channels=16, kernel_size=8, stride=4),
-            nn.BatchNorm2d(16),
-            nn.ReLU(),
-            nn.Conv2d(in_channels=16, out_channels=32, kernel_size=4, stride=2),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.Flatten(),
-            nn.Linear(in_features=2592, out_features=hidden_size),
-            nn.ReLU(),
-        )
+        # self.feature = nn.Sequential(
+        #     nn.Conv2d(in_channels=num_inputs, out_channels=16, kernel_size=8, stride=4),
+        #     nn.BatchNorm2d(16),
+        #     nn.ReLU(),
+        #     nn.Conv2d(in_channels=16, out_channels=32, kernel_size=4, stride=2),
+        #     nn.BatchNorm2d(32),
+        #     nn.ReLU(),
+        #     nn.Flatten(),
+        #     nn.Linear(in_features=2592, out_features=hidden_size),
+        #     nn.ReLU(),
+        # )
         # self.attention = nn.MultiheadAttention(embed_dim, 16)
         self.attention = MyTransformerEncoderLayer(embed_dim, 16, 256)
 
@@ -167,11 +174,16 @@ class ActorCritic(nn.Module):
             nn.Softmax(dim=1),
         )
 
-    def forward(self, x, memory, mask=None):
-        feature = self.feature(x)
-        query = feature.unsqueeze(dim=0) # sequence first
-        attention, scores = self.attention(query, memory, memory, src_key_padding_mask=mask)
-        attn_out = attention.squeeze(dim=0)
+    def forward(self, x):
+        # feature = self.feature(x)
+        patches = x.unfold(2, PATCH_H, PATCH_H)
+        patches = patches.unfold(3, PATCH_W, PATCH_W)
+        patches = patches.contiguous().view(x.shape[0], x.shape[1], -1, PATCH_H, PATCH_W)
+        patches = patches.permute(2, 0, 1, 3, 4)
+        feature = patches.view(patches.shape[0], patches.shape[1], -1)
+        attention, scores = self.attention(feature, feature, feature)
+        attn_out = attention.permute(1, 0, 2)
+        attn_out = attn_out.contiguous().view(attn_out.shape[0], -1)
         value = self.critic(attn_out)
         probs = self.actor(attn_out)
         dist = Categorical(probs)
@@ -279,20 +291,20 @@ def compute_gae(next_value, rewards, masks, values, gamma=G_GAE, lam=L_GAE):
     return returns
 
 
-def ppo_iter(states, actions, log_probs, returns, advantages, seq):
+def ppo_iter(states, actions, log_probs, returns, advantages):
     batch_size = states.size(0)  # lenght of data collected
 
     for _ in range(batch_size // M):
         rand_ids = np.random.randint(0, batch_size, M)  # integer array of random indices for selecting M mini batches
-        reverse_ids = seq.flip_seq_idx(rand_ids)
-        seq_feature, seq_mask = seq.fetch_seq(reverse_ids)
-        yield states[rand_ids, :], actions[rand_ids, :], log_probs[rand_ids, :], returns[rand_ids, :], advantages[rand_ids, :], seq_feature, seq_mask
+        # reverse_ids = seq.flip_seq_idx(rand_ids)
+        # seq_feature, seq_mask = seq.fetch_seq(reverse_ids)
+        yield states[rand_ids, :], actions[rand_ids, :], log_probs[rand_ids, :], returns[rand_ids, :], advantages[rand_ids, :]
 
 
-def ppo_update(model, optimizer, states, actions, log_probs, returns, advantages, seq, clip_param=E_CLIP):
+def ppo_update(model, optimizer, states, actions, log_probs, returns, advantages, clip_param=E_CLIP):
     for _ in range(K):
-        for state, action, old_log_probs, return_, advantage, seq_feature, seq_mask in ppo_iter(states, actions, log_probs, returns, advantages, seq):
-            dist, value, _ = model(state, seq_feature, seq_mask)
+        for state, action, old_log_probs, return_, advantage in ppo_iter(states, actions, log_probs, returns, advantages):
+            dist, value, _ = model(state)
             action = action.reshape(1, len(action)) # take the relative action and take the column
             new_log_probs = dist.log_prob(action)
             new_log_probs = new_log_probs.reshape(len(old_log_probs), 1) # take the column
@@ -375,8 +387,8 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
     total_runs_1_env = 0
     steps_1_env = 0
 
-    seq = Seq(seq_len=LOOK_BACK_SIZE, batch_size=N, rolling_size=T, feature_size=EMBED_DIM, device=device)
-    fixed_idx = np.asarray([j for j in range(N)])
+    # seq = Seq(seq_len=LOOK_BACK_SIZE, batch_size=N, rolling_size=T, feature_size=EMBED_DIM, device=device)
+    # fixed_idx = np.asarray([j for j in range(N)])
 
     while not early_stop:
         log_probs = []
@@ -388,7 +400,7 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
 
         for i in range(T):
             state = torch.FloatTensor(state).to(device)
-            dist, value, feature = model(state, *seq.fetch_seq(fixed_idx))
+            dist, value, feature = model(state)
             action = dist.sample().to(device)
             next_state, reward, done, _ = envs.step(action.cpu().numpy())
             next_state = grey_crop_resize_batch(next_state)  # simplify perceptions (grayscale-> crop-> resize) to train CNN
@@ -402,8 +414,8 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
             masks.append(torch.FloatTensor(1 - done).unsqueeze(1).to(device))
             states.append(state)
             state = next_state
-            seq.roll_seq_feature(feature.detach().cpu().numpy())
-            seq.roll_seq_mask(1 - done[:, np.newaxis])
+            # seq.roll_seq_feature(feature.detach().cpu().numpy())
+            # seq.roll_seq_mask(1 - done[:, np.newaxis])
 
             total_reward_1_env += reward[0]
             steps_1_env += 1
@@ -415,7 +427,7 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
                 steps_1_env = 0
 
         next_state = torch.FloatTensor(next_state).to(device)  # consider last state of the collection step
-        _, next_value, _ = model(next_state, *seq.fetch_seq(fixed_idx))  # collect last value effect of the last collection step
+        _, next_value, _ = model(next_state)  # collect last value effect of the last collection step
         returns = compute_gae(next_value, rewards, masks, values)
         returns = torch.cat(returns).detach()  # concatenates along existing dimension and detach the tensor from the network graph, making the tensor no gradient
         log_probs = torch.cat(log_probs).detach()
@@ -425,7 +437,7 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
         advantages = returns - values  # compute advantage for each action
         advantages = normalize(advantages)  # compute the normalization of the vector to make uniform values
         loss, actor_loss, critic_loss, entropy_loss = ppo_update(
-            model, optimizer, states, actions, log_probs, returns, advantages, seq)
+            model, optimizer, states, actions, log_probs, returns, advantages)
         train_epoch += 1
 
         total_steps = train_epoch * T
@@ -480,7 +492,7 @@ def train(load_from=None):
     train_epoch = 0
     best_reward = None
 
-    summary(model, input_size=[(1, 84, 84), (1, H_SIZE)], batch_dim=0, dtypes=[torch.float, torch.float])
+    summary(model, input_size=[(1, 84, 84)], batch_dim=0, dtypes=[torch.float, torch.float])
 
     if load_from is not None:
         checkpoint = torch.load(load_from, map_location=None if use_cuda else torch.device('cpu'))
@@ -507,22 +519,22 @@ def test_env(env, model, device):
     total_reward = 0
 
     # set rolling_size=0
-    seq = Seq(seq_len=LOOK_BACK_SIZE, batch_size=1, rolling_size=0, feature_size=EMBED_DIM, device=device)
-    fixed_idx = np.asarray([j for j in range(1)])
+    # seq = Seq(seq_len=LOOK_BACK_SIZE, batch_size=1, rolling_size=0, feature_size=EMBED_DIM, device=device)
+    # fixed_idx = np.asarray([j for j in range(1)])
 
     while not done:
         state = torch.FloatTensor(state).unsqueeze(0).to(device)
-        dist, _, feature = model(state, *seq.fetch_seq(fixed_idx))
+        dist, _, feature = model(state)
         action = dist.sample().cpu().numpy()[0]
         next_state, reward, done, _, _ = env.step(action)
         next_state = grey_crop_resize(next_state)
         state = next_state
         total_reward += reward
 
-        done = np.asarray([done])
-        mask = 1 - done[:, np.newaxis]
-        seq.roll_seq_feature(feature.detach().cpu().numpy())
-        seq.roll_seq_mask(mask)
+        # done = np.asarray([done])
+        # mask = 1 - done[:, np.newaxis]
+        # seq.roll_seq_feature(feature.detach().cpu().numpy())
+        # seq.roll_seq_mask(mask)
 
     return total_reward
 
