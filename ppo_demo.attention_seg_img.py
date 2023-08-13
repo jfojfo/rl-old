@@ -44,7 +44,7 @@ EMBED_DIM = PATCH_W * PATCH_H
 LOOK_BACK_SIZE = NUM_X * NUM_Y
 
 MODEL_DIR = 'models'
-MODEL = 'ppo_demo.attention_seg_img'
+MODEL = 'ppo_demo.attention_cascade_4_seg_img'
 # ENV_ID = 'Pong-v0'
 ENV_ID = 'PongDeterministic-v0'
 
@@ -116,34 +116,30 @@ class MyTransformerEncoderLayer(nn.Module):
         self.dropout1 = nn.Dropout(dropout)
         self.norm1 = nn.LayerNorm(embed_dim)
 
-        self.linear1 = nn.Linear(embed_dim // 4, dim_feedforward)
+        self.linear1 = nn.Linear(embed_dim, dim_feedforward)
         self.dropout = nn.Dropout(dropout)
-        self.linear2 = nn.Linear(dim_feedforward, embed_dim // 4)
+        self.linear2 = nn.Linear(dim_feedforward, embed_dim)
         self.activation = F.relu
 
         self.dropout2 = nn.Dropout(dropout)
-        self.norm2 = nn.LayerNorm(embed_dim // 4)
+        self.norm2 = nn.LayerNorm(embed_dim)
 
-    def forward(self, query, key, value, src_mask=None, src_key_padding_mask=None):
+    def forward(self, src, src_mask=None, src_key_padding_mask=None):
         """
         :param src: 编码部分的输入，形状为 [src_len,batch_size, embed_dim]
         :param src_mask:  编码部分输入的padding情况，形状为 [batch_size, src_len]
         :return: # [src_len, batch_size, num_heads * kdim] <==> [src_len,batch_size,embed_dim]
         """
-        src = query
-        src2, w = self.self_attn(query, key, value, attn_mask=src_mask, key_padding_mask=src_key_padding_mask)  # 计算多头注意力
+        src2, w = self.self_attn(src, src, src, attn_mask=src_mask, key_padding_mask=src_key_padding_mask)  # 计算多头注意力
         # src2: [src_len,batch_size,num_heads*kdim] num_heads*kdim = embed_dim
         src = src + self.dropout1(src2)  # 残差连接
         src = self.norm1(src)  # [src_len,batch_size,num_heads*kdim]
-
-        src = src[:, :, 0:src.shape[2] // 4]
 
         src2 = self.activation(self.linear1(src))  # [src_len,batch_size,dim_feedforward]
         src2 = self.linear2(self.dropout(src2))  # [src_len,batch_size,num_heads*kdim]
         src = src + self.dropout2(src2)
         src = self.norm2(src)
-        return src, w  # [src_len, batch_size, num_heads * kdim] <==> [src_len,batch_size,embed_dim]
-
+        return src  # [src_len, batch_size, num_heads * kdim] <==> [src_len,batch_size,embed_dim]
 
 class ActorCritic(nn.Module):
     def __init__(self, num_inputs, num_outputs, hidden_size=H_SIZE, embed_dim=EMBED_DIM):
@@ -160,17 +156,24 @@ class ActorCritic(nn.Module):
         #     nn.ReLU(),
         # )
         # self.attention = nn.MultiheadAttention(embed_dim, 16)
-        self.attention = MyTransformerEncoderLayer(embed_dim, 16, 256)
-
+        self.attention = nn.Sequential(
+            MyTransformerEncoderLayer(embed_dim, 24, embed_dim * 2),
+            nn.AdaptiveAvgPool1d(embed_dim // 2),
+            MyTransformerEncoderLayer(embed_dim // 2, 12, embed_dim),
+            nn.AdaptiveAvgPool1d(embed_dim // 4),
+            MyTransformerEncoderLayer(embed_dim // 4, 6, embed_dim // 2),
+            nn.AdaptiveAvgPool1d(embed_dim // 8),
+            MyTransformerEncoderLayer(embed_dim // 8, 3, embed_dim // 4),
+        )
         self.critic = nn.Sequential(  # The “Critic” estimates the value function
             # nn.Linear(in_features=hidden_size, out_features=hidden_size),
             # nn.ReLU(),
-            nn.Linear(in_features=hidden_size, out_features=1),
+            nn.Linear(in_features=embed_dim // 8 * NUM_X * NUM_Y, out_features=1),
         )
         self.actor = nn.Sequential(  # The “Actor” updates the policy distribution in the direction suggested by the Critic (such as with policy gradients)
             # nn.Linear(in_features=hidden_size, out_features=hidden_size),
             # nn.ReLU(),
-            nn.Linear(in_features=hidden_size, out_features=num_outputs),
+            nn.Linear(in_features=embed_dim // 8 * NUM_X * NUM_Y, out_features=num_outputs),
             nn.Softmax(dim=1),
         )
 
@@ -181,7 +184,7 @@ class ActorCritic(nn.Module):
         patches = patches.contiguous().view(x.shape[0], x.shape[1], -1, PATCH_H, PATCH_W)
         patches = patches.permute(2, 0, 1, 3, 4)
         feature = patches.view(patches.shape[0], patches.shape[1], -1)
-        attention, scores = self.attention(feature, feature, feature)
+        attention = self.attention(feature)
         attn_out = attention.permute(1, 0, 2)
         attn_out = attn_out.contiguous().view(attn_out.shape[0], -1)
         value = self.critic(attn_out)
