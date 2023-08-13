@@ -45,9 +45,26 @@ ppo_demo.vae_recon_mean_kl_loss_c3_0.01.PongDeterministic-v0：reconstruction lo
 
 # ppo_demo.attention
 
-attention版
+attention版，Conv后的feature组成sequence，每次step后Conv得到feature作为query，去历史sequence中查key、value得到attention
 
 16起步比64快，后期64的test分高一些，且train得分波动小一些，两者在test时分数都有大幅下跌的情况
 
-* ppo_demo.attention_test.PongDeterministic-v0：look_back_size=16
-* ppo_demo.attention_test_64.PongDeterministic-v0：look_back_size=64
+* ppo_demo.attention_test.PongDeterministic-v0：look_back_size=16，成功
+* ppo_demo.attention_test_64.PongDeterministic-v0：look_back_size=64，成功
+
+# ppo_demo.attention_seg_img
+
+attention_seg_img版，去掉Conv，只用Sequence。
+将84x84 image切分成7x7块12x12的patches，每个patch展开后embed dim=144，sequence len=49
+更占用GPU内存
+
+* ppo_demo.attention_seg_img.PongDeterministic-v0：失败，一层seq，最后输出时只取144/4=36的embed dim长度，得分到-10就不涨了；
+* ppo_demo.attention_cascade_4_seg_img.PongDeterministic-v0：半失败，得分0-10，波动幅度大，4层seq
+  * seq1：144 embed，24 heads，288 linear；
+  * seq2：AdaptiveAvgPool1d 缩减embed为72，12 heads，144 linear；
+  * seq3：AdaptiveAvgPool1d 缩减embed为36，6 heads，72 linear；
+  * seq4：AdaptiveAvgPool1d 缩减embed为18，3 heads，36 linear；
+
+
+
+
