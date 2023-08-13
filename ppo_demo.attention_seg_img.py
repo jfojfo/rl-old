@@ -23,7 +23,7 @@ PATCH_W = 12
 NUM_Y = 7
 NUM_X = 7
 
-H_SIZE = PATCH_H * PATCH_W * NUM_Y * NUM_X // 4 # hidden size, linear units of the output layer
+H_SIZE = 128 # hidden size, linear units of the output layer
 L_RATE = 1e-4 # learning rate, gradient coefficient for CNN weight update
 G_GAE = 0.99 # gamma param for GAE
 L_GAE = 0.95 # lambda param for GAE
@@ -31,7 +31,7 @@ E_CLIP = 0.2 # clipping coefficient
 C_1 = 0.5 # squared loss coefficient
 C_2 = 0.01 # entropy coefficient
 C_3 = 0.1 # image reconstruction loss coefficient
-N = 8 # simultaneous processing environments
+N = 2 # simultaneous processing environments
 T = 256 # PPO steps to get envs data
 M = 64 # mini batch size
 K = 10 # PPO epochs repeated to optimise
@@ -166,31 +166,35 @@ class ActorCritic(nn.Module):
             MyTransformerEncoderLayer(embed_dim // 8, 3, embed_dim // 4),
         )
         self.critic = nn.Sequential(  # The “Critic” estimates the value function
-            # nn.Linear(in_features=hidden_size, out_features=hidden_size),
-            # nn.ReLU(),
-            nn.Linear(in_features=embed_dim // 8 * NUM_X * NUM_Y, out_features=1),
+            nn.Linear(in_features=embed_dim // 8 * NUM_Y * NUM_X, out_features=hidden_size),
+            nn.ReLU(),
+            nn.Linear(in_features=hidden_size, out_features=1),
         )
         self.actor = nn.Sequential(  # The “Actor” updates the policy distribution in the direction suggested by the Critic (such as with policy gradients)
-            # nn.Linear(in_features=hidden_size, out_features=hidden_size),
-            # nn.ReLU(),
-            nn.Linear(in_features=embed_dim // 8 * NUM_X * NUM_Y, out_features=num_outputs),
+            nn.Linear(in_features=embed_dim // 8 * NUM_Y * NUM_X, out_features=hidden_size),
+            nn.ReLU(),
+            nn.Linear(in_features=hidden_size, out_features=num_outputs),
             nn.Softmax(dim=1),
         )
 
+    def get_patches(self, x, h, w, h_step, w_step):
+        patches = x.unfold(2, h, h_step)
+        patches = patches.unfold(3, w, w_step)
+        patches = patches.contiguous().view(x.shape[0], x.shape[1], -1, h, w)
+        patches = patches.permute(2, 0, 1, 3, 4)
+        patches = patches.view(patches.shape[0], patches.shape[1], -1)
+        return patches
+
     def forward(self, x):
         # feature = self.feature(x)
-        patches = x.unfold(2, PATCH_H, PATCH_H)
-        patches = patches.unfold(3, PATCH_W, PATCH_W)
-        patches = patches.contiguous().view(x.shape[0], x.shape[1], -1, PATCH_H, PATCH_W)
-        patches = patches.permute(2, 0, 1, 3, 4)
-        feature = patches.view(patches.shape[0], patches.shape[1], -1)
-        attention = self.attention(feature)
+        patches = self.get_patches(x, PATCH_H, PATCH_W, PATCH_H, PATCH_W)
+        attention = self.attention(patches)
         attn_out = attention.permute(1, 0, 2)
         attn_out = attn_out.contiguous().view(attn_out.shape[0], -1)
         value = self.critic(attn_out)
         probs = self.actor(attn_out)
         dist = Categorical(probs)
-        return dist, value, feature
+        return dist, value, attn_out
 
 
 class SeqTorch:
