@@ -25,7 +25,8 @@ L_GAE = 0.95 # lambda param for GAE
 E_CLIP = 0.2 # clipping coefficient
 C_1 = 0.5 # squared loss coefficient
 C_2 = 0.01 # entropy coefficient
-C_3 = 0.1 # image reconstruction loss coefficient
+C_3 = 0.01 # image reconstruction loss coefficient
+C_4 = 0.01 # kl loss coefficient
 N = 8 # simultaneous processing environments
 T = 256 # PPO steps to get envs data
 M = 64 # mini batch size
@@ -37,7 +38,7 @@ TRANSFER_LEARNING = False
 LATENT_DIM = 10
 
 MODEL_DIR = 'models'
-MODEL = 'ppo_demo.vae_care_for_batchnorm'
+MODEL = 'ppo_demo.vae_latent_10_c3_0.1_c4_0.1'
 # ENV_ID = 'Pong-v0'
 ENV_ID = 'PongDeterministic-v0'
 
@@ -94,7 +95,7 @@ class CNN(nn.Module):
         z = self.latent_sample(latent_mu, latent_logvar)
         x_recon = self.decoder(z)
 
-        return dist, value, x_recon
+        return dist, value, x_recon, latent_mu, latent_logvar
 
     def latent_sample(self, mu, logvar):
         if self.training:
@@ -158,7 +159,7 @@ def ppo_iter(states, actions, log_probs, returns, advantage):
 def ppo_update(model, optimizer, states, actions, log_probs, returns, advantages, clip_param=E_CLIP):
     for _ in range(K):
         for state, action, old_log_probs, return_, advantage in ppo_iter(states, actions, log_probs, returns, advantages):
-            dist, value, state_recon = model(state)
+            dist, value, state_recon, latent_mu, latent_logvar = model(state)
             action = action.reshape(1, len(action)) # take the relative action and take the column
             new_log_probs = dist.log_prob(action)
             new_log_probs = new_log_probs.reshape(len(old_log_probs), 1) # take the column
@@ -168,12 +169,14 @@ def ppo_update(model, optimizer, states, actions, log_probs, returns, advantages
             actor_loss = - torch.min(surr1, surr2).mean()
             critic_loss = (return_ - value).pow(2).mean()
             entropy_loss = dist.entropy().mean()
-            recon_loss = F.binary_cross_entropy(state_recon, state, reduction='none').sum(dim=(1, 2, 3)).mean()
-            loss = C_1 * critic_loss + actor_loss - C_2 * entropy_loss + C_3 * recon_loss # loss function clip+vs+f
+            recon_loss = F.binary_cross_entropy(state_recon, state, reduction='none').mean()
+            # recon_loss = (state_recon - state).pow(2).sum(dim=(1, 2, 3)).mean()
+            kl_loss = -(1 + latent_logvar - latent_mu.pow(2) - latent_logvar.exp()).sum()
+            loss = C_1 * critic_loss + actor_loss - C_2 * entropy_loss + C_3 * recon_loss + C_4 * kl_loss # loss function clip+vs+f
             optimizer.zero_grad() # in PyTorch, we need to set the gradients to zero before starting to do backpropragation because PyTorch accumulates the gradients on subsequent backward passes.
             loss.backward() # computes dloss/dx for every parameter x which has requires_grad=True. These are accumulated into x.grad for every parameter x
             optimizer.step() # performs the parameters update based on the current gradient and the update rule
-    return loss, actor_loss, critic_loss, entropy_loss, recon_loss / (state.shape[1] * state.shape[2] * state.shape[3])
+    return loss, actor_loss, critic_loss, entropy_loss, recon_loss, kl_loss
 
 
 def test_env(env, model, device):
@@ -184,7 +187,7 @@ def test_env(env, model, device):
     total_reward = 0
     while not done:
         state = torch.FloatTensor(state).unsqueeze(0).to(device)
-        dist, _, _ = model(state)
+        dist, _, _, _, _ = model(state)
         action = dist.sample().cpu().numpy()[0]
         next_state, reward, done, _, _ = env.step(action)
         next_state = grey_crop_resize(next_state)
@@ -202,6 +205,7 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
     total_reward_1_env = 0
     total_runs_1_env = 0
     steps_1_env = 0
+    last_save_epoch = 0
 
     while not early_stop:
         log_probs = []
@@ -213,7 +217,7 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
 
         for i in range(T):
             state = torch.FloatTensor(state).to(device)
-            dist, value, state_recon = model(state)
+            dist, value, _, _, _ = model(state)
             action = dist.sample().to(device)
             next_state, reward, done, _ = envs.step(action.cpu().numpy())
             next_state = grey_crop_resize_batch(next_state)  # simplify perceptions (grayscale-> crop-> resize) to train CNN
@@ -238,7 +242,7 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
                 steps_1_env = 0
 
         next_state = torch.FloatTensor(next_state).to(device)  # consider last state of the collection step
-        _, next_value, _ = model(next_state)  # collect last value effect of the last collection step
+        _, next_value, _, _, _ = model(next_state)  # collect last value effect of the last collection step
         returns = compute_gae(next_value, rewards, masks, values)
         returns = torch.cat(returns).detach()  # concatenates along existing dimension and detach the tensor from the network graph, making the tensor no gradient
         log_probs = torch.cat(log_probs).detach()
@@ -247,8 +251,7 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
         actions = torch.cat(actions)
         advantage = returns - values  # compute advantage for each action
         advantage = normalize(advantage)  # compute the normalization of the vector to make uniform values
-        loss, actor_loss, critic_loss, entropy_loss, recon_loss = ppo_update(
-            model, optimizer, states, actions, log_probs, returns, advantage)
+        loss, actor_loss, critic_loss, entropy_loss, recon_loss, kl_loss = ppo_update(model, optimizer, states, actions, log_probs, returns, advantage)
         train_epoch += 1
 
         total_steps = train_epoch * T
@@ -257,6 +260,7 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
         writer.add_scalar('Loss/Critic Loss', critic_loss.item(), total_steps)
         writer.add_scalar('Loss/Entropy Loss', entropy_loss.item(), total_steps)
         writer.add_scalar('Loss/Recon Loss', recon_loss.item(), total_steps)
+        writer.add_scalar('Loss/KL Loss', kl_loss.item(), total_steps)
 
         if train_epoch % T_EPOCHS == 0:  # do a test every T_EPOCHS times
             model.eval()
@@ -270,20 +274,28 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
             if best_reward is None or best_reward < test_reward:  # save a checkpoint every time it achieves a better reward
                 if best_reward is not None:
                     print("Best reward updated: %.3f -> %.3f" % (best_reward, test_reward))
-                    name = "%s_%s_%+.3f_%d.pth" % (MODEL, ENV_ID, test_reward, train_epoch)
-                    fname = os.path.join(MODEL_DIR, name)
-                    states = {
-                        'state_dict': model.state_dict(),
-                        'optimizer': optimizer.state_dict(),
-                        'test_rewards': test_rewards,
-                        'test_epochs': test_epochs,
-                    }
-                    torch.save(states, fname)
-
+                    save_model(model, optimizer, test_reward, train_epoch, test_rewards, test_epochs)
+                    last_save_epoch = train_epoch
                 best_reward = test_reward
+            elif train_epoch - last_save_epoch >= 500:
+                print("save model: %.3f" % test_reward)
+                save_model(model, optimizer, test_reward, train_epoch, test_rewards, test_epochs)
+                last_save_epoch = train_epoch
 
             if test_reward > TARGET_REWARD:  # stop training if archive the best
                 early_stop = True
+
+
+def save_model(model, optimizer, test_reward, train_epoch, test_rewards, test_epochs):
+    name = "%s_%s_%+.3f_%d.pth" % (MODEL, ENV_ID, test_reward, train_epoch)
+    fname = os.path.join(MODEL_DIR, name)
+    states = {
+        'state_dict': model.state_dict(),
+        'optimizer': optimizer.state_dict(),
+        'test_rewards': test_rewards,
+        'test_epochs': test_epochs,
+    }
+    torch.save(states, fname)
 
 
 def train(load_from=None):
