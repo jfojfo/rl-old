@@ -36,7 +36,7 @@ N_TESTS = 10 # do N_TESTS tests
 TARGET_REWARD = 20
 TRANSFER_LEARNING = False
 EMBED_DIM = H_SIZE
-LOOK_BACK_SIZE = 16
+LOOK_BACK_SIZE = 64
 
 MODEL_DIR = 'models'
 MODEL = 'ppo_demo.attention_64'
@@ -138,6 +138,30 @@ class MyTransformerEncoderLayer(nn.Module):
         return src, w  # [src_len, batch_size, num_heads * kdim] <==> [src_len,batch_size,embed_dim]
 
 
+class PositionalEmbedding(nn.Module):
+    def __init__(self, d_model, max_length=512):
+        super(PositionalEmbedding, self).__init__()
+        self.d_model = d_model
+
+        # Create constant positional encoding matrix
+        pe = torch.zeros(max_length, d_model)
+
+        position = torch.arange(0, max_length, dtype=torch.float).unsqueeze(1)
+        div_term = torch.exp(torch.arange(0, d_model, 2).float() * (-torch.log(torch.tensor(10000.0)) / d_model))
+
+        # Calculate the positional encodings
+        pe[:, 0::2] = torch.sin(position * div_term)
+        pe[:, 1::2] = torch.cos(position * div_term)
+
+        # Register the positional encoding as a buffer
+        self.register_buffer('pe', pe.unsqueeze(1))
+
+    def forward(self, x):
+        # Add positional encodings to the input tensor
+        x = x + self.pe[:x.size(0), :]
+        return x
+
+
 class ActorCritic(nn.Module):
     def __init__(self, num_inputs, num_outputs, hidden_size=H_SIZE, embed_dim=EMBED_DIM):
         super(ActorCritic, self).__init__()
@@ -154,6 +178,7 @@ class ActorCritic(nn.Module):
         )
         # self.attention = nn.MultiheadAttention(embed_dim, 16)
         self.attention = MyTransformerEncoderLayer(embed_dim, 16, 256)
+        self.pos_encode = PositionalEmbedding(EMBED_DIM, LOOK_BACK_SIZE)
 
         self.critic = nn.Sequential(  # The “Critic” estimates the value function
             # nn.Linear(in_features=hidden_size, out_features=hidden_size),
@@ -169,7 +194,10 @@ class ActorCritic(nn.Module):
 
     def forward(self, x, memory, mask=None):
         feature = self.feature(x)
+        # memory_pos = self.pos_encode(memory)
         query = feature.unsqueeze(dim=0) # sequence first
+        # query_pos = self.pos_encode(query)
+        # attention, scores = self.attention(query_pos, memory_pos, memory_pos, src_key_padding_mask=mask)
         attention, scores = self.attention(query, memory, memory, src_key_padding_mask=mask)
         attn_out = attention.squeeze(dim=0)
         value = self.critic(attn_out)
@@ -178,64 +206,64 @@ class ActorCritic(nn.Module):
         return dist, value, feature
 
 
-class SeqTorch:
-    def __init__(self, seq_len=LOOK_BACK_SIZE, batch_size=N, rolling_size=T, feature_size=EMBED_DIM, device='cpu'):
-        self.seq_len = seq_len
-        self.batch_size = batch_size
-        self.rolling_size = rolling_size
-        self.seq_features = torch.zeros((seq_len + rolling_size) * batch_size, feature_size).to(device)
-        self.seq_masks = torch.zeros(rolling_size * batch_size, 1).to(device)
-
-    def flip_seq_idx(self, idx):
-        seq_idx = (self.rolling_size - 1 - idx // self.batch_size) * self.batch_size + idx % self.batch_size  # invert index, when N=2, [509, 511] should select [3,1] index
-        return seq_idx
-
-    def fetch_seq(self, idx):
-        seq = self.seq_features
-        mask = self.seq_masks
-        # reverse_mask = None if mask is None else torch.flip(mask.view(T, N, -1), dims=[0]).view(T * N, -1)
-        results = []
-        for start in idx:
-            # indices = torch.arange(start, start + LOOK_BACK_SIZE * N, N)
-            # d = torch.index_select(seq, 0, indices)
-            d = seq[start:start + self.seq_len * self.batch_size:self.batch_size] * 1  # will make a new tensor
-            # mask_value, _ = torch.cummin(reverse_mask[start::N], dim=0)
-            # results.append(d * mask_value)
-
-            i = torch.arange(start, mask.shape[0], self.batch_size)
-            is_zero = (mask[i, 0] == 0)
-            non_zero_pos = is_zero.nonzero()
-            if non_zero_pos.shape[0] > 0:
-                first_zero_index = non_zero_pos.min()
-                d[first_zero_index:] = 0  # d is a new tensor, no modification to seq
-            results.append(d.unsqueeze(dim=1))
-        sub_seq = torch.cat(results, dim=1)
-        return sub_seq
-
-    def _roll_seq(self, seq, data, order=0):
-        if order == -1:
-            start = data.shape[0]
-            end = seq.shape[0]
-            seq = torch.cat((seq[start:end], data), dim=0)
-        else:
-            start = 0
-            end = seq.shape[0] - data.shape[0]
-            seq = torch.cat((data, seq[start:end]), dim=0)
-        return seq
-
-    def roll_seq_feature(self, data):
-        self.seq_features = self._roll_seq(self.seq_features, data)
-
-    def roll_seq_mask(self, data):
-        self.seq_masks = self._roll_seq(self.seq_masks, data)
-
-    def mask_last_epoch(self, last_mask):
-        seq = self.seq_features
-        if last_mask is not None:
-            mask = last_mask.view(-1, self.batch_size, 1)
-            cum_mask, _ = mask.cummin(dim=0)
-            cum_mask = cum_mask.view(-1, 1)
-            seq[self.rolling_size:self.rolling_size + cum_mask.shape[0]] *= cum_mask  # modify seq inplace
+# class SeqTorch:
+#     def __init__(self, seq_len=LOOK_BACK_SIZE, batch_size=N, rolling_size=T, feature_size=EMBED_DIM, device='cpu'):
+#         self.seq_len = seq_len
+#         self.batch_size = batch_size
+#         self.rolling_size = rolling_size
+#         self.seq_features = torch.zeros((seq_len + rolling_size) * batch_size, feature_size).to(device)
+#         self.seq_masks = torch.zeros(rolling_size * batch_size, 1).to(device)
+#
+#     def flip_seq_idx(self, idx):
+#         seq_idx = (self.rolling_size - 1 - idx // self.batch_size) * self.batch_size + idx % self.batch_size  # invert index, when N=2, [509, 511] should select [3,1] index
+#         return seq_idx
+#
+#     def fetch_seq(self, idx):
+#         seq = self.seq_features
+#         mask = self.seq_masks
+#         # reverse_mask = None if mask is None else torch.flip(mask.view(T, N, -1), dims=[0]).view(T * N, -1)
+#         results = []
+#         for start in idx:
+#             # indices = torch.arange(start, start + LOOK_BACK_SIZE * N, N)
+#             # d = torch.index_select(seq, 0, indices)
+#             d = seq[start:start + self.seq_len * self.batch_size:self.batch_size] * 1  # will make a new tensor
+#             # mask_value, _ = torch.cummin(reverse_mask[start::N], dim=0)
+#             # results.append(d * mask_value)
+#
+#             i = torch.arange(start, mask.shape[0], self.batch_size)
+#             is_zero = (mask[i, 0] == 0)
+#             non_zero_pos = is_zero.nonzero()
+#             if non_zero_pos.shape[0] > 0:
+#                 first_zero_index = non_zero_pos.min()
+#                 d[first_zero_index:] = 0  # d is a new tensor, no modification to seq
+#             results.append(d.unsqueeze(dim=1))
+#         sub_seq = torch.cat(results, dim=1)
+#         return sub_seq
+#
+#     def _roll_seq(self, seq, data, order=0):
+#         if order == -1:
+#             start = data.shape[0]
+#             end = seq.shape[0]
+#             seq = torch.cat((seq[start:end], data), dim=0)
+#         else:
+#             start = 0
+#             end = seq.shape[0] - data.shape[0]
+#             seq = torch.cat((data, seq[start:end]), dim=0)
+#         return seq
+#
+#     def roll_seq_feature(self, data):
+#         self.seq_features = self._roll_seq(self.seq_features, data)
+#
+#     def roll_seq_mask(self, data):
+#         self.seq_masks = self._roll_seq(self.seq_masks, data)
+#
+#     def mask_last_epoch(self, last_mask):
+#         seq = self.seq_features
+#         if last_mask is not None:
+#             mask = last_mask.view(-1, self.batch_size, 1)
+#             cum_mask, _ = mask.cummin(dim=0)
+#             cum_mask = cum_mask.view(-1, 1)
+#             seq[self.rolling_size:self.rolling_size + cum_mask.shape[0]] *= cum_mask  # modify seq inplace
 
 
 def normalize(x):
