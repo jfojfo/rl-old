@@ -49,8 +49,9 @@ attention版，Conv后的feature组成sequence，每次step后Conv得到feature�
 
 16起步比64快，后期64的test分高一些，且train得分波动小一些，两者在test时分数都有大幅下跌的情况
 
-* ppo_demo.attention_test.PongDeterministic-v0：look_back_size=16，成功
-* ppo_demo.attention_test_64.PongDeterministic-v0：look_back_size=64，成功
+* ppo_demo.attention_test.PongDeterministic-v0：成功，look_back_size=16
+* ppo_demo.attention_test_64.PongDeterministic-v0：成功，look_back_size=64
+* ppo_demo.attention_64_pos_encode.PongDeterministic-v0：成功，look_back_size=64，加PositionalEmbedding，得分比不加pos encoding略低
 
 # ppo_demo.attention_seg_img
 
@@ -64,7 +65,6 @@ attention_seg_img版，去掉Conv，只用Sequence。
   * seq2：AdaptiveAvgPool1d 缩减embed为72，12 heads，144 linear；
   * seq3：AdaptiveAvgPool1d 缩减embed为36，6 heads，72 linear；
   * seq4：AdaptiveAvgPool1d 缩减embed为18，3 heads，36 linear；
-
 
 
 
