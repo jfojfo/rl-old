@@ -41,7 +41,11 @@ demo diff版，没想象中效果好，是否与VecENv done之后返回下一局
 vae版
 
 ppo_demo.vae_recon_mean_kl_loss_c3_0.01.PongDeterministic-v0：reconstruction loss改为mean，c3、c4都调小为0.01，
-起步快，比ppo_demo基础版都快，中间能训练到20，但时间长了会掉落回-20，且波动大不稳定，test reward不及基础版
+起步快，比ppo_demo基础版都快，中间能训练到20，但时间长了会掉落回-20，且波动大不稳定，test reward不及基础版。
+
+去掉Conv BatchNorm后成功！！！
+
+* ppo_demo.vae_latent_10_c3_0.01_c4_0.01_no_batchnorm.PongDeterministic-v0：成功，去除了Conv BatchNorm，mean recon_loss，mean kl_loss，c3=0.01，c4=0.01
 
 # ppo_demo.attention
 
