@@ -38,7 +38,7 @@ TRANSFER_LEARNING = False
 LATENT_DIM = 10
 
 MODEL_DIR = 'models'
-MODEL = 'ppo_demo.vae_latent_10_c3_0.1_c4_0.1'
+MODEL = 'ppo_demo.vae_latent_10_c3_0.01_c4_0.01_no_batchnorm'
 # ENV_ID = 'Pong-v0'
 ENV_ID = 'PongDeterministic-v0'
 
@@ -48,10 +48,10 @@ class CNN(nn.Module):
         super(CNN, self).__init__()
         self.feature = nn.Sequential(
             nn.Conv2d(in_channels=num_inputs, out_channels=16, kernel_size=8, stride=4),
-            nn.BatchNorm2d(16),
+            # nn.BatchNorm2d(16),
             nn.ReLU(),
             nn.Conv2d(in_channels=16, out_channels=32, kernel_size=4, stride=2),
-            nn.BatchNorm2d(32),
+            # nn.BatchNorm2d(32),
             nn.ReLU(),
             nn.Flatten(),
             nn.Linear(in_features=2592, out_features=hidden_size),
@@ -67,7 +67,7 @@ class CNN(nn.Module):
             nn.ReLU(),
             nn.Unflatten(1, (32, 9, 9)),
             nn.ConvTranspose2d(32, 16, kernel_size=4, stride=2),
-            nn.BatchNorm2d(16),
+            # nn.BatchNorm2d(16),
             nn.ReLU(),
             nn.ConvTranspose2d(16, 1, kernel_size=8, stride=4),
             nn.Sigmoid()
@@ -171,7 +171,7 @@ def ppo_update(model, optimizer, states, actions, log_probs, returns, advantages
             entropy_loss = dist.entropy().mean()
             recon_loss = F.binary_cross_entropy(state_recon, state, reduction='none').mean()
             # recon_loss = (state_recon - state).pow(2).sum(dim=(1, 2, 3)).mean()
-            kl_loss = -(1 + latent_logvar - latent_mu.pow(2) - latent_logvar.exp()).sum()
+            kl_loss = -(1 + latent_logvar - latent_mu.pow(2) - latent_logvar.exp()).mean()
             loss = C_1 * critic_loss + actor_loss - C_2 * entropy_loss + C_3 * recon_loss + C_4 * kl_loss # loss function clip+vs+f
             optimizer.zero_grad() # in PyTorch, we need to set the gradients to zero before starting to do backpropragation because PyTorch accumulates the gradients on subsequent backward passes.
             loss.backward() # computes dloss/dx for every parameter x which has requires_grad=True. These are accumulated into x.grad for every parameter x
