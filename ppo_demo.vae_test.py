@@ -11,6 +11,7 @@ from stable_baselines3.common.vec_env import VecVideoRecorder, SubprocVecEnv
 import argparse
 from torchinfo import summary
 import torch.nn.functional as F
+import torchvision
 
 
 #
@@ -25,8 +26,8 @@ L_GAE = 0.95 # lambda param for GAE
 E_CLIP = 0.2 # clipping coefficient
 C_1 = 0.5 # squared loss coefficient
 C_2 = 0.01 # entropy coefficient
-C_3 = 0.1 # image reconstruction loss coefficient
-C_4 = 0.1 # kl loss coefficient
+C_3 = 1 # image reconstruction loss coefficient
+C_4 = 0.01 # kl loss coefficient
 N = 8 # simultaneous processing environments
 T = 256 # PPO steps to get envs data
 M = 64 # mini batch size
@@ -38,11 +39,11 @@ TRANSFER_LEARNING = False
 LATENT_DIM = 4
 
 MODEL_DIR = 'models'
-MODEL = 'ppo_demo.vae_ac_from_latent_4_c3_0.1_c4_0.1_recon_sum_mean_kl_sum_mean_no_batchnorm'
+MODEL = 'ppo_demo.vae_ac_from_latent_4_c3_1_c4_0.01_recon_sum_mean_kl_sum_mean_no_batchnorm'
 # ENV_ID = 'Pong-v0'
 ENV_ID = 'PongDeterministic-v0'
 
-
+torch.norm
 class CNN(nn.Module):
     def __init__(self, num_inputs, num_outputs, hidden_size):
         super(CNN, self).__init__()
@@ -202,12 +203,16 @@ def ppo_update(model, optimizer, states, actions, log_probs, returns, advantages
 
             optimizer.zero_grad()
             loss.backward()
+            # max_norm = 100.0
+            # torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm)
+
             grad_total = params_feature.grad.mean(), params_feature.grad.std()
+            grad_max = params_feature.grad.abs().max()
 
             # loss.backward() # computes dloss/dx for every parameter x which has requires_grad=True. These are accumulated into x.grad for every parameter x
             optimizer.step() # performs the parameters update based on the current gradient and the update rule
-    return loss, actor_loss, critic_loss, entropy_loss, recon_loss / (state.shape[2] * state.shape[3]), kl_loss, \
-           grad_critic[0], grad_actor[0], grad_entropy[0], grad_recon[0], grad_kl[0], grad_total[0], latent_mu, latent_logvar.exp()
+    return loss, actor_loss, critic_loss, entropy_loss, recon_loss / (state.shape[2] * state.shape[3]), kl_loss / LATENT_DIM, \
+           grad_critic[0], grad_actor[0], grad_entropy[0], grad_recon[0], grad_kl[0], grad_total[0], grad_max, latent_mu, latent_logvar.exp()
 
 
 def test_env(env, model, device):
@@ -226,7 +231,15 @@ def test_env(env, model, device):
         total_reward += reward
     return total_reward
 
+def hook_fn(module, input, output):
+    module.feature_map = output
+
 def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_epoch, best_reward, early_stop=False):
+    conv1_model = model.feature.get_submodule('0')
+    conv1_model.register_forward_hook(hook_fn)
+    conv2_model = model.feature.get_submodule('2')
+    conv2_model.register_forward_hook(hook_fn)
+
     writer = SummaryWriter(comment=f'.{MODEL}.{ENV_ID}')
     env_test = gym.make(ENV_ID, render_mode='rgb_array')
 
@@ -283,7 +296,7 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
         advantage = returns - values  # compute advantage for each action
         advantage = normalize(advantage)  # compute the normalization of the vector to make uniform values
         loss, actor_loss, critic_loss, entropy_loss, recon_loss, kl_loss, \
-        grad_critic_mean, grad_actor_mean, grad_entropy_mean, grad_recon_mean, grad_kl_mean, grad_total_mean,\
+        grad_critic_mean, grad_actor_mean, grad_entropy_mean, grad_recon_mean, grad_kl_mean, grad_total_mean, grad_max,\
         latent_mu, latent_var = \
             ppo_update(model, optimizer, states, actions, log_probs, returns, advantage)
         train_epoch += 1
@@ -296,6 +309,7 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
         writer.add_scalar('Loss/Recon Loss', recon_loss.item(), total_steps)
         writer.add_scalar('Loss/KL Loss', kl_loss.item(), total_steps)
 
+        writer.add_scalar('Grad/Max', grad_max.item(), total_steps)
         writer.add_scalar('Grad/Critic', grad_critic_mean.item(), total_steps)
         writer.add_scalar('Grad/Actor', grad_actor_mean.item(), total_steps)
         writer.add_scalar('Grad/Entropy', grad_entropy_mean.item(), total_steps)
@@ -303,16 +317,25 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
         writer.add_scalar('Grad/KL', grad_kl_mean.item(), total_steps)
         writer.add_scalar('Grad/Total', grad_total_mean.item(), total_steps)
 
-        mu_dict = {}
-        var_dict = {}
         for i, mu in enumerate(latent_mu[0]):
-            mu_dict[f'mu_{i}'] = mu.item()
+            writer.add_scalar(f'Latent/mu_{i}', mu.item(), total_steps)
         for i, var in enumerate(latent_var[0]):
-            var_dict[f'var_{i}'] = var.item()
-        writer.add_scalars('Latent/mu', mu_dict, total_steps)
-        writer.add_scalars('Latent/var', var_dict, total_steps)
+            writer.add_scalar(f'Latent/var_{i}', var.item(), total_steps)
 
         if train_epoch % T_EPOCHS == 0:  # do a test every T_EPOCHS times
+            # 增维，（batch_num,output_channel,width,height）->(batch_num,output_channel,1,width,height)
+            # (64, 16, 20, 20)
+            b, c, w, h = conv1_model.feature_map.shape
+            conv1_feature_map = conv1_model.feature_map[:16].unsqueeze(dim=2).view(-1, 1, w, h)
+            conv1_feature_map_grids = torchvision.utils.make_grid(conv1_feature_map, nrow=16, padding=1, normalize=True)
+            writer.add_image("FeatureMap/conv1", conv1_feature_map_grids, total_steps)
+
+            # (64, 32, 9, 9)
+            b, c, w, h = conv2_model.feature_map.shape
+            conv2_feature_map = conv2_model.feature_map.unsqueeze(dim=2).view(-1, 1, w, h)
+            conv2_feature_map_grids = torchvision.utils.make_grid(conv2_feature_map, nrow=32, padding=1, normalize=True)
+            writer.add_image("FeatureMap/conv2", conv2_feature_map_grids, total_steps)
+
             model.eval()
             test_reward = np.mean([test_env(env_test, model, device) for _ in range(N_TESTS)])  # do N_TESTS tests and takes the mean reward
             model.train()
