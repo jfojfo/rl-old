@@ -12,6 +12,7 @@ import argparse
 from torchinfo import summary
 import torch.nn.functional as F
 import torchvision
+import plot_util
 
 
 #
@@ -212,7 +213,8 @@ def ppo_update(model, optimizer, states, actions, log_probs, returns, advantages
             # loss.backward() # computes dloss/dx for every parameter x which has requires_grad=True. These are accumulated into x.grad for every parameter x
             optimizer.step() # performs the parameters update based on the current gradient and the update rule
     return loss, actor_loss, critic_loss, entropy_loss, recon_loss / (state.shape[2] * state.shape[3]), kl_loss / LATENT_DIM, \
-           grad_critic[0], grad_actor[0], grad_entropy[0], grad_recon[0], grad_kl[0], grad_total[0], grad_max, latent_mu, latent_logvar.exp()
+           grad_critic[0], grad_actor[0], grad_entropy[0], grad_recon[0], grad_kl[0], grad_total[0], grad_max, \
+           latent_mu, latent_logvar.exp(), state, state_recon
 
 
 def test_env(env, model, device):
@@ -297,7 +299,7 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
         advantage = normalize(advantage)  # compute the normalization of the vector to make uniform values
         loss, actor_loss, critic_loss, entropy_loss, recon_loss, kl_loss, \
         grad_critic_mean, grad_actor_mean, grad_entropy_mean, grad_recon_mean, grad_kl_mean, grad_total_mean, grad_max,\
-        latent_mu, latent_var = \
+        latent_mu, latent_var, x, x_recon = \
             ppo_update(model, optimizer, states, actions, log_probs, returns, advantage)
         train_epoch += 1
 
@@ -336,13 +338,22 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
             conv2_feature_map_grids = torchvision.utils.make_grid(conv2_feature_map, nrow=32, padding=1, normalize=True)
             writer.add_image("FeatureMap/conv2", conv2_feature_map_grids, total_steps)
 
+            for i in range(3):
+                writer.add_images(f'Image/{i}', torch.stack((x[i], x_recon[i]), dim=0), total_steps)
+
+
             model.eval()
+
             test_reward = np.mean([test_env(env_test, model, device) for _ in range(N_TESTS)])  # do N_TESTS tests and takes the mean reward
-            model.train()
             test_rewards.append(test_reward)  # collect the mean rewards for saving performance metric
             test_epochs.append(train_epoch)
             print('Epoch: %s -> Reward: %s' % (train_epoch, test_reward))
             writer.add_scalar('Reward/test_reward', test_reward, total_steps)
+
+            latent_recon = plot_util.plot_latent_space(model, LATENT_DIM)
+            writer.add_image("Image/latent_recon", latent_recon, total_steps)
+
+            model.train()
 
             if best_reward is None or best_reward < test_reward:  # save a checkpoint every time it achieves a better reward
                 if best_reward is not None:
