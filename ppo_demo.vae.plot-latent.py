@@ -28,8 +28,8 @@ def show_image(img, ax, title):
 
 def plot_latent_space(model, device):
     # create a sample grid in 2d latent space
-    latent_x = np.linspace(-5,5,10)
-    latent_y = np.linspace(-5,5,10)
+    latent_x = np.linspace(-2.5, 2.5, 10)
+    latent_y = np.linspace(-2.5, 2.5, 10)
     latents = torch.FloatTensor(len(latent_y), len(latent_x), 2)
     for i, lx in enumerate(latent_x):
         for j, ly in enumerate(latent_y):
@@ -37,8 +37,8 @@ def plot_latent_space(model, device):
             latents[j, i, 1] = ly
     latents = latents.view(-1, 2) # flatten grid into a batch
     latents_other = torch.zeros((latents.shape[0], LATENT_DIM - latents.shape[1])) + 0.0
-    # latents = torch.cat((latents, latents_other), dim=1)
-    latents = torch.cat((latents_other, latents), dim=1)
+    # latents = torch.cat((latents_other, latents), dim=1)
+    latents = torch.cat((latents_other[:,0:5], latents[:,:1], latents_other[:,5:8], latents[:,1:], latents_other[:,8:]), dim=1)
 
     mixed = latents.to(device)
     image_recon = model.decoder(mixed)
