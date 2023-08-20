@@ -44,8 +44,20 @@ ppo_demo.vae_recon_mean_kl_loss_c3_0.01.PongDeterministic-v0：reconstruction lo
 起步快，比ppo_demo基础版都快，中间能训练到20，但时间长了会掉落回-20，且波动大不稳定，test reward不及基础版。
 
 去掉Conv BatchNorm后成功！！！
+之前BatchNorm失败原因可能是，model在update之外的步骤，比如env.step、算next_state得分，也调用了，会影响BatchNorm。如果限定在update步骤可以成功。
 
-* ppo_demo.vae_latent_10_c3_0.01_c4_0.01_no_batchnorm.PongDeterministic-v0：成功，去除了Conv BatchNorm，mean recon_loss，mean kl_loss，c3=0.01，c4=0.01
+* ppo_demo.vae_latent_10_c3_0.01_c4_0.01_no_batchnorm.PongDeterministic-v0：成功，去除了Conv BatchNorm，feature是最后一层Conv，
+latent=10，c3=0.01，c4=0.01，mean(recon_loss)，mean(kl_loss)
+kl grad、recon grad与critic grad相差量级，且kl grad与recon grad也相差量级
+* ppo_demo.vae_ac_from_latent_4_c3_1_c4_0.01_recon_sum_mean_kl_sum_mean_no_batchnorm.PongDeterministic-v0：得分10，去除了Conv BatchNorm，feature是latent输出，
+latent=4，c3=1，c4=0.01，mean(sum(recon_loss,dim=(1,2,3)))，mean(sum(kl_loss,dim=1))，
+调整c3 c4系数后，kl grad、recon grad与critic grad量级相当，
+tensorboard中的kl_loss已经除以latent_dim（cumulative KL divergence (or “rate”, in bits per dimension)），~5.7
+* ppo_demo.vae_ac_from_latent_4_c3_0.1_c4_0.001_recon_sum_mean_kl_sum_mean_no_batchnorm.PongDeterministic-v0：失败
+* ppo_demo.vae_ac_from_latent_10_c3_1_c4_0.01_recon_sum_mean_kl_sum_mean_no_batchnorm.PongDeterministic-v0：成功
+* ppo_demo.vae_ac_from_latent_10_c3_1_c4_0.01_recon_sum_mean_kl_sum_mean_batchnorm_only_update.PongDeterministic-v0：成功，得分略低，起步快但后续慢下来，
+BatchNorm限定在update步骤
+* ppo_demo.vae_ac_from_latent_10_c3_0.1_c4_0.001_recon_sum_mean_kl_sum_mean_batchnorm_only_update.PongDeterministic-v0：失败
 
 # ppo_demo.attention
 
