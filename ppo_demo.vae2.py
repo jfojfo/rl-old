@@ -12,7 +12,7 @@ import argparse
 from torchinfo import summary
 import torch.nn.functional as F
 import torchvision
-import plot_util
+import vis_util
 from collections import OrderedDict
 
 
@@ -30,7 +30,7 @@ C_1 = 0.5 # squared loss coefficient
 C_2 = 0.01 # entropy coefficient
 C_3 = 1 # image reconstruction loss coefficient
 C_4 = 0.01 # kl loss coefficient
-N = 2 # simultaneous processing environments
+N = 8 # simultaneous processing environments
 T = 256 # PPO steps to get envs data
 M = 64 # mini batch size
 K = 10 # PPO epochs repeated to optimise
@@ -352,7 +352,7 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
             writer.add_scalar('Reward/test_reward', test_reward, total_steps)
 
             for i in range(0, LATENT_DIM - 1, 2):
-                latent_recon = plot_util.plot_latent_space(model, LATENT_DIM, i, (-2, 2), 15)
+                latent_recon = vis_util.plot_latent_space(model, LATENT_DIM, i, (-2, 2), 15)
                 writer.add_image(f"Image/latent_recon_{i}", latent_recon, total_steps)
 
             if best_reward is None or best_reward < test_reward:  # save a checkpoint every time it achieves a better reward
@@ -382,6 +382,26 @@ def save_model(model, optimizer, test_reward, train_epoch, test_rewards, test_ep
     torch.save(states, fname)
 
 
+def load_model(model, state_dict):
+    # adapt model layer's old name
+    if 'feature.conv1.weight' not in state_dict:
+        state_dict['feature.conv1.weight'] = state_dict['feature.0.weight']
+        state_dict['feature.conv1.bias'] = state_dict['feature.0.bias']
+        del state_dict['feature.0.weight']
+        del state_dict['feature.0.bias']
+    if 'feature.conv2.weight' not in state_dict:
+        state_dict['feature.conv2.weight'] = state_dict['feature.2.weight']
+        state_dict['feature.conv2.bias'] = state_dict['feature.2.bias']
+        del state_dict['feature.2.weight']
+        del state_dict['feature.2.bias']
+    if 'feature.linear.weight' not in state_dict:
+        state_dict['feature.linear.weight'] = state_dict['feature.5.weight']
+        state_dict['feature.linear.bias'] = state_dict['feature.5.bias']
+        del state_dict['feature.5.weight']
+        del state_dict['feature.5.bias']
+    model.load_state_dict(state_dict)
+
+
 def train(load_from=None):
     print('Env:', ENV_ID)
     print('Model:', MODEL)
@@ -404,24 +424,7 @@ def train(load_from=None):
 
     if load_from is not None:
         checkpoint = torch.load(load_from, map_location=None if use_cuda else torch.device('cpu'))
-        state_dict = checkpoint['state_dict']
-        # adapt model layer's old name
-        if 'feature.conv1.weight' not in state_dict:
-            state_dict['feature.conv1.weight'] = state_dict['feature.0.weight']
-            state_dict['feature.conv1.bias'] = state_dict['feature.0.bias']
-            del state_dict['feature.0.weight']
-            del state_dict['feature.0.bias']
-        if 'feature.conv2.weight' not in state_dict:
-            state_dict['feature.conv2.weight'] = state_dict['feature.2.weight']
-            state_dict['feature.conv2.bias'] = state_dict['feature.2.bias']
-            del state_dict['feature.2.weight']
-            del state_dict['feature.2.bias']
-        if 'feature.linear.weight' not in state_dict:
-            state_dict['feature.linear.weight'] = state_dict['feature.5.weight']
-            state_dict['feature.linear.bias'] = state_dict['feature.5.bias']
-            del state_dict['feature.5.weight']
-            del state_dict['feature.5.bias']
-        model.load_state_dict(checkpoint['state_dict'])
+        load_model(model, checkpoint['state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer'])
         test_rewards = checkpoint['test_rewards']
         test_epochs = checkpoint['test_epochs']
@@ -449,7 +452,7 @@ def eval(load_from):
     model.eval()
 
     checkpoint = torch.load(load_from, map_location=None if use_cuda else torch.device('cpu'))
-    model.load_state_dict(checkpoint['state_dict'])
+    load_model(model, checkpoint['state_dict'])
 
     while True:
         test_env(env_test, model, device)
