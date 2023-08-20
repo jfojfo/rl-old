@@ -30,7 +30,7 @@ C_1 = 0.5 # squared loss coefficient
 C_2 = 0.01 # entropy coefficient
 C_3 = 1 # image reconstruction loss coefficient
 C_4 = 0.01 # kl loss coefficient
-N = 8 # simultaneous processing environments
+N = 2 # simultaneous processing environments
 T = 256 # PPO steps to get envs data
 M = 64 # mini batch size
 K = 10 # PPO epochs repeated to optimise
@@ -404,6 +404,23 @@ def train(load_from=None):
 
     if load_from is not None:
         checkpoint = torch.load(load_from, map_location=None if use_cuda else torch.device('cpu'))
+        state_dict = checkpoint['state_dict']
+        # adapt model layer's old name
+        if 'feature.conv1.weight' not in state_dict:
+            state_dict['feature.conv1.weight'] = state_dict['feature.0.weight']
+            state_dict['feature.conv1.bias'] = state_dict['feature.0.bias']
+            del state_dict['feature.0.weight']
+            del state_dict['feature.0.bias']
+        if 'feature.conv2.weight' not in state_dict:
+            state_dict['feature.conv2.weight'] = state_dict['feature.2.weight']
+            state_dict['feature.conv2.bias'] = state_dict['feature.2.bias']
+            del state_dict['feature.2.weight']
+            del state_dict['feature.2.bias']
+        if 'feature.linear.weight' not in state_dict:
+            state_dict['feature.linear.weight'] = state_dict['feature.5.weight']
+            state_dict['feature.linear.bias'] = state_dict['feature.5.bias']
+            del state_dict['feature.5.weight']
+            del state_dict['feature.5.bias']
         model.load_state_dict(checkpoint['state_dict'])
         optimizer.load_state_dict(checkpoint['optimizer'])
         test_rewards = checkpoint['test_rewards']
