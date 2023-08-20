@@ -13,6 +13,7 @@ from torchinfo import summary
 import torch.nn.functional as F
 import torchvision
 import plot_util
+from collections import OrderedDict
 
 
 #
@@ -37,28 +38,27 @@ T_EPOCHS = 100 # T_EPOCH to test and save
 N_TESTS = 10 # do N_TESTS tests
 TARGET_REWARD = 20
 TRANSFER_LEARNING = False
-LATENT_DIM = 4
+LATENT_DIM = 10
 
 MODEL_DIR = 'models'
-MODEL = 'ppo_demo.vae_ac_from_latent_4_c3_1_c4_0.01_recon_sum_mean_kl_sum_mean_no_batchnorm'
+MODEL = 'ppo_demo.vae_ac_from_latent_10_c3_1_c4_0.01_recon_sum_mean_kl_sum_mean_no_batchnorm'
 # ENV_ID = 'Pong-v0'
 ENV_ID = 'PongDeterministic-v0'
 
-torch.norm
 class CNN(nn.Module):
     def __init__(self, num_inputs, num_outputs, hidden_size):
         super(CNN, self).__init__()
-        self.feature = nn.Sequential(
-            nn.Conv2d(in_channels=num_inputs, out_channels=16, kernel_size=8, stride=4),
-            # nn.BatchNorm2d(16),
-            nn.ReLU(),
-            nn.Conv2d(in_channels=16, out_channels=32, kernel_size=4, stride=2),
-            # nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.Flatten(),
-            nn.Linear(in_features=2592, out_features=hidden_size),
-            nn.ReLU(),
-        )
+        self.feature = nn.Sequential(OrderedDict([
+            ('conv1', nn.Conv2d(in_channels=num_inputs, out_channels=16, kernel_size=8, stride=4)),
+            # ('batchnorm1', nn.BatchNorm2d(16)),
+            ('act1', nn.ReLU()),
+            ('conv2', nn.Conv2d(in_channels=16, out_channels=32, kernel_size=4, stride=2)),
+            # ('batchnorm2', nn.BatchNorm2d(32)),
+            ('act2', nn.ReLU()),
+            ('flatten', nn.Flatten()),
+            ('linear', nn.Linear(in_features=2592, out_features=hidden_size)),
+            ('act3', nn.ReLU()),
+        ]))
         self.encoder = nn.Sequential(
             nn.Linear(hidden_size, LATENT_DIM * 2)
         )
@@ -160,8 +160,7 @@ def ppo_iter(states, actions, log_probs, returns, advantage):
 
 
 def ppo_update(model, optimizer, states, actions, log_probs, returns, advantages, clip_param=E_CLIP):
-    params = list(model.named_parameters())
-    params_feature = params[4][1]
+    params_feature = model.get_parameter('feature.linear.weight')
     for _ in range(K):
         for state, action, old_log_probs, return_, advantage in ppo_iter(states, actions, log_probs, returns, advantages):
             dist, value, state_recon, latent_mu, latent_logvar = model(state)
@@ -237,9 +236,9 @@ def hook_fn(module, input, output):
     module.feature_map = output
 
 def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_epoch, best_reward, early_stop=False):
-    conv1_model = model.feature.get_submodule('0')
+    conv1_model = model.feature.get_submodule('conv1')
     conv1_model.register_forward_hook(hook_fn)
-    conv2_model = model.feature.get_submodule('2')
+    conv2_model = model.feature.get_submodule('conv2')
     conv2_model.register_forward_hook(hook_fn)
 
     writer = SummaryWriter(comment=f'.{MODEL}.{ENV_ID}')
@@ -261,6 +260,7 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
         rewards = []
         masks = []
 
+        model.eval()
         for i in range(T):
             state = torch.FloatTensor(state).to(device)
             dist, value, _, _, _ = model(state)
@@ -297,10 +297,14 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
         actions = torch.cat(actions)
         advantage = returns - values  # compute advantage for each action
         advantage = normalize(advantage)  # compute the normalization of the vector to make uniform values
+
+        model.train()
         loss, actor_loss, critic_loss, entropy_loss, recon_loss, kl_loss, \
         grad_critic_mean, grad_actor_mean, grad_entropy_mean, grad_recon_mean, grad_kl_mean, grad_total_mean, grad_max,\
         latent_mu, latent_var, x, x_recon = \
             ppo_update(model, optimizer, states, actions, log_probs, returns, advantage)
+        model.eval()
+
         train_epoch += 1
 
         total_steps = train_epoch * T
@@ -338,11 +342,8 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
             conv2_feature_map_grids = torchvision.utils.make_grid(conv2_feature_map, nrow=32, padding=1, normalize=True)
             writer.add_image("FeatureMap/conv2", conv2_feature_map_grids, total_steps)
 
-            for i in range(3):
+            for i in range(4):
                 writer.add_images(f'Image/{i}', torch.stack((x[i], x_recon[i]), dim=0), total_steps)
-
-
-            model.eval()
 
             test_reward = np.mean([test_env(env_test, model, device) for _ in range(N_TESTS)])  # do N_TESTS tests and takes the mean reward
             test_rewards.append(test_reward)  # collect the mean rewards for saving performance metric
@@ -350,10 +351,9 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
             print('Epoch: %s -> Reward: %s' % (train_epoch, test_reward))
             writer.add_scalar('Reward/test_reward', test_reward, total_steps)
 
-            latent_recon = plot_util.plot_latent_space(model, LATENT_DIM)
-            writer.add_image("Image/latent_recon", latent_recon, total_steps)
-
-            model.train()
+            for i in range(0, LATENT_DIM - 1, 2):
+                latent_recon = plot_util.plot_latent_space(model, LATENT_DIM, i, (-2, 2), 15)
+                writer.add_image(f"Image/latent_recon_{i}", latent_recon, total_steps)
 
             if best_reward is None or best_reward < test_reward:  # save a checkpoint every time it achieves a better reward
                 if best_reward is not None:
