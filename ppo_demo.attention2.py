@@ -1,4 +1,5 @@
 import os
+from collections import OrderedDict
 import gymnasium as gym
 import torch
 import numpy as np
@@ -26,6 +27,7 @@ L_GAE = 0.95 # lambda param for GAE
 E_CLIP = 0.2 # clipping coefficient
 C_1 = 0.5 # squared loss coefficient
 C_2 = 0.01 # entropy coefficient
+C_3 = 1 # predict loss coefficient
 N = 8 # simultaneous processing environments
 T = 256 # PPO steps to get envs data
 M = 64 # mini batch size
@@ -35,10 +37,10 @@ N_TESTS = 10 # do N_TESTS tests
 TARGET_REWARD = 20
 TRANSFER_LEARNING = False
 EMBED_DIM = H_SIZE
-LOOK_BACK_SIZE = 64
+LOOK_BACK_SIZE = 16
 
 MODEL_DIR = 'models'
-MODEL = 'ppo_demo.attention_64'
+MODEL = 'ppo_demo.attention_pred_16_c3_1'
 # ENV_ID = 'Pong-v0'
 ENV_ID = 'PongDeterministic-v0'
 
@@ -164,20 +166,31 @@ class PositionalEmbedding(nn.Module):
 class ActorCritic(nn.Module):
     def __init__(self, num_inputs, num_outputs, hidden_size=H_SIZE, embed_dim=EMBED_DIM):
         super(ActorCritic, self).__init__()
-        self.feature = nn.Sequential(
-            nn.Conv2d(in_channels=num_inputs, out_channels=16, kernel_size=8, stride=4),
-            nn.BatchNorm2d(16),
-            nn.ReLU(),
-            nn.Conv2d(in_channels=16, out_channels=32, kernel_size=4, stride=2),
-            nn.BatchNorm2d(32),
-            nn.ReLU(),
-            nn.Flatten(),
-            nn.Linear(in_features=2592, out_features=hidden_size),
-            nn.ReLU(),
-        )
+        self.num_outputs = num_outputs
+        self.feature = nn.Sequential(OrderedDict([
+            ('conv1', nn.Conv2d(in_channels=num_inputs, out_channels=16, kernel_size=8, stride=4)),
+            # ('batchnorm1', nn.BatchNorm2d(16)),
+            ('act1', nn.ReLU()),
+            ('conv2', nn.Conv2d(in_channels=16, out_channels=32, kernel_size=4, stride=2)),
+            # ('batchnorm2', nn.BatchNorm2d(32)),
+            ('act2', nn.ReLU()),
+            ('conv3', nn.Conv2d(in_channels=32, out_channels=32, kernel_size=3, stride=2)),
+            ('act3', nn.ReLU()),
+            ('flatten', nn.Flatten()),
+            ('linear', nn.Linear(in_features=32 * 4 * 4, out_features=hidden_size)),
+            ('act', nn.Sigmoid()),
+        ]))
+
         # self.attention = nn.MultiheadAttention(embed_dim, 16)
         self.attention = MyTransformerEncoderLayer(embed_dim, 16, 256)
-        self.pos_encode = PositionalEmbedding(EMBED_DIM, LOOK_BACK_SIZE)
+        # self.pos_encode = PositionalEmbedding(EMBED_DIM, LOOK_BACK_SIZE)
+
+        self.pred_next = nn.Sequential(
+            nn.Linear(in_features=hidden_size + num_outputs, out_features=hidden_size * 4),
+            nn.ReLU(),
+            nn.Linear(in_features=hidden_size * 4, out_features=hidden_size),
+            nn.Sigmoid(),
+        )
 
         self.critic = nn.Sequential(  # The “Critic” estimates the value function
             # nn.Linear(in_features=hidden_size, out_features=hidden_size),
@@ -202,7 +215,14 @@ class ActorCritic(nn.Module):
         value = self.critic(attn_out)
         probs = self.actor(attn_out)
         dist = Categorical(probs)
-        return dist, value, feature
+
+        return dist, value, feature, attn_out
+
+    def pred_next_feature(self, attn_out, action, x_next):
+        feature_next = self.feature(x_next)
+        action_one_hot = F.one_hot(action.squeeze(dim=1), self.num_outputs).to(torch.float32)
+        pred_feature_next = self.pred_next(torch.concat((attn_out, action_one_hot), dim=1))
+        return pred_feature_next, feature_next
 
 
 # class SeqTorch:
@@ -307,19 +327,34 @@ def compute_gae(next_value, rewards, masks, values, gamma=G_GAE, lam=L_GAE):
 
 
 def ppo_iter(states, actions, log_probs, returns, advantages, seq):
-    batch_size = states.size(0)  # lenght of data collected
+    # batch_size = states.size(0)  # lenght of data collected
+    batch_size = actions.size(0) * actions.size(1)
 
     for _ in range(batch_size // M):
-        rand_ids = np.random.randint(0, batch_size, M)  # integer array of random indices for selecting M mini batches
-        reverse_ids = seq.flip_seq_idx(rand_ids)
-        seq_feature, seq_mask = seq.fetch_seq(reverse_ids)
-        yield states[rand_ids, :], actions[rand_ids, :], log_probs[rand_ids, :], returns[rand_ids, :], advantages[rand_ids, :], seq_feature, seq_mask
+        # rand_ids = np.random.randint(0, batch_size, M)  # integer array of random indices for selecting M mini batches
+        # reverse_ids = seq.flip_seq_idx(rand_ids)
+        # (Len, Batch, ...)
+        rand_ids_0 = np.random.randint(0, actions.size(0), M)
+        rand_ids_1 = np.random.randint(0, actions.size(1), M)
+        reverse_ids_0 = actions.size(0) - rand_ids_0
+        seq_feature, seq_mask = seq.fetch_seq(reverse_ids_0, rand_ids_1)
+        yield states[rand_ids_0, rand_ids_1, :], \
+              actions[rand_ids_0, rand_ids_1, :], \
+              log_probs[rand_ids_0, rand_ids_1, :], \
+              returns[rand_ids_0, rand_ids_1, :], \
+              advantages[rand_ids_0, rand_ids_1, :], \
+              states[rand_ids_0 + 1, rand_ids_1, :], \
+              seq_feature, \
+              seq_mask
 
 
 def ppo_update(model, optimizer, states, actions, log_probs, returns, advantages, seq, clip_param=E_CLIP):
+    params_feature = model.get_parameter('feature.linear.weight')
     for _ in range(K):
-        for state, action, old_log_probs, return_, advantage, seq_feature, seq_mask in ppo_iter(states, actions, log_probs, returns, advantages, seq):
-            dist, value, _ = model(state, seq_feature, seq_mask)
+        for state, action, old_log_probs, return_, advantage, next_state, seq_feature, seq_mask in ppo_iter(states, actions, log_probs, returns, advantages, seq):
+            dist, value, _, attn_out = model(state, seq_feature, seq_mask)
+            pred_feature_next, feature_next = model.pred_next_feature(attn_out, action, next_state)
+
             action = action.reshape(1, len(action)) # take the relative action and take the column
             new_log_probs = dist.log_prob(action)
             new_log_probs = new_log_probs.reshape(len(old_log_probs), 1) # take the column
@@ -329,11 +364,38 @@ def ppo_update(model, optimizer, states, actions, log_probs, returns, advantages
             actor_loss = - torch.min(surr1, surr2).mean()
             critic_loss = (return_ - value).pow(2).mean()
             entropy_loss = -dist.entropy().mean()
-            loss = C_1 * critic_loss + actor_loss + C_2 * entropy_loss # loss function clip+vs+f
+
+            feature_next = feature_next.detach()
+            pred_loss = F.mse_loss(pred_feature_next, feature_next, reduction='none').sum(dim=1).mean()
+
+            loss = C_1 * critic_loss + actor_loss + C_2 * entropy_loss + C_3 * pred_loss
+
+            optimizer.zero_grad() # in PyTorch, we need to set the gradients to zero before starting to do backpropragation because PyTorch accumulates the gradients on subsequent backward passes.
+            (C_1 * critic_loss).backward(retain_graph=True)
+            grad_critic = params_feature.grad.mean(), params_feature.grad.std()
+
+            optimizer.zero_grad()
+            actor_loss.backward(retain_graph=True)
+            grad_actor = params_feature.grad.mean(), params_feature.grad.std()
+
+            optimizer.zero_grad()
+            (- C_2 * entropy_loss).backward(retain_graph=True)
+            grad_entropy = params_feature.grad.mean(), params_feature.grad.std()
+
+            optimizer.zero_grad()
+            (C_3 * pred_loss).backward(retain_graph=True)
+            grad_pred = params_feature.grad.mean(), params_feature.grad.std()
+
             optimizer.zero_grad() # in PyTorch, we need to set the gradients to zero before starting to do backpropragation because PyTorch accumulates the gradients on subsequent backward passes.
             loss.backward() # computes dloss/dx for every parameter x which has requires_grad=True. These are accumulated into x.grad for every parameter x
+
+            grad_total = params_feature.grad.mean(), params_feature.grad.std()
+            grad_max = params_feature.grad.abs().max()
+
             optimizer.step() # performs the parameters update based on the current gradient and the update rule
-    return loss, actor_loss, critic_loss, entropy_loss
+    return {'loss': loss, 'actor_loss': actor_loss, 'critic_loss': critic_loss, 'entropy_loss': entropy_loss, 'pred_loss': pred_loss,
+            'grad_critic': grad_critic[0], 'grad_actor': grad_actor[0], 'grad_entropy': grad_entropy[0], 'grad_pred': grad_pred[0],
+            'grad_total': grad_total[0], 'grad_max': grad_max}
 
 
 class Seq:
@@ -342,38 +404,27 @@ class Seq:
         self.batch_size = batch_size
         self.rolling_size = rolling_size
         self.device = device
-        self.seq_features = np.zeros([(seq_len + rolling_size) * batch_size, feature_size], dtype=np.float32)
-        self.seq_masks = np.zeros([(seq_len + rolling_size) * batch_size, 1], dtype=np.float32)
+        self.seq_features = np.zeros([seq_len + rolling_size, batch_size, feature_size], dtype=np.float32)
+        self.seq_masks = np.zeros([seq_len + rolling_size, batch_size, 1], dtype=np.float32)
 
-    def flip_seq_idx(self, idx):
-        seq_idx = (self.rolling_size - 1 - idx // self.batch_size) * self.batch_size + idx % self.batch_size  # invert index, when N=2, [509, 511] should select [3,1] index
-        return seq_idx
-
-    def fetch_seq(self, idx):
+    def fetch_seq(self, idx0, idx1):
         seq = self.seq_features
         mask = self.seq_masks
-        d_list = []
-        m_list = []
-        for start in idx:
-            d = seq[start:start + self.seq_len * self.batch_size:self.batch_size] * 1  # will make a new tensor
-            m = mask[start:start + self.seq_len * self.batch_size:self.batch_size] * 1  # will make a new tensor
-            d_list.append(d[:, np.newaxis, :])
-            m_list.append(m[:, np.newaxis, :])
-        sub_seq = np.concatenate(d_list, axis=1)
-        sub_mask = np.concatenate(m_list, axis=1)
+        # (L, B, ...)
+        sub_seq = np.stack([seq[idx0 + i, idx1] * 1 for i in range(self.seq_len)], axis=0)
+        sub_mask = np.stack([mask[idx0 + i, idx1] * 1 for i in range(self.seq_len)], axis=0)
         cum_mask = 1 - np.minimum.accumulate(sub_mask, axis=0)
         cum_mask = cum_mask.squeeze(axis=2).T  # (batch, seq)
         cum_mask[cum_mask == 1] = -1e-7
         return torch.from_numpy(sub_seq).to(self.device), torch.from_numpy(cum_mask).to(self.device)
 
     def _roll_seq(self, seq, data, order=0):
-        n = data.shape[0]
         if order == -1:
-            seq[:-n] = seq[n:]
-            seq[-n:] = data
+            seq[:-1] = seq[1:]
+            seq[-1] = data
         else:
-            seq[n:] = seq[:-n]
-            seq[:n] = data
+            seq[1:] = seq[:-1]
+            seq[0] = data
 
     def roll_seq_feature(self, data):
         self._roll_seq(self.seq_features, data)
@@ -403,7 +454,8 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
     steps_1_env = 0
 
     seq = Seq(seq_len=LOOK_BACK_SIZE, batch_size=N, rolling_size=T, feature_size=EMBED_DIM, device=device)
-    fixed_idx = np.asarray([j for j in range(N)])
+    fixed_idx_0 = np.asarray([0 for j in range(N)])
+    fixed_idx_1 = np.asarray([j for j in range(N)])
 
     while not early_stop:
         log_probs = []
@@ -415,7 +467,7 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
 
         for i in range(T):
             state = torch.FloatTensor(state).to(device)
-            dist, value, feature = model(state, *seq.fetch_seq(fixed_idx))
+            dist, value, feature, _ = model(state, *seq.fetch_seq(fixed_idx_0, fixed_idx_1))
             action = dist.sample().to(device)
             next_state, reward, done, _ = envs.step(action.cpu().numpy())
             next_state = grey_crop_resize_batch(next_state)  # simplify perceptions (grayscale-> crop-> resize) to train CNN
@@ -442,24 +494,33 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
                 steps_1_env = 0
 
         next_state = torch.FloatTensor(next_state).to(device)  # consider last state of the collection step
-        _, next_value, _ = model(next_state, *seq.fetch_seq(fixed_idx))  # collect last value effect of the last collection step
+        _, next_value, _, _ = model(next_state, *seq.fetch_seq(fixed_idx_0, fixed_idx_1))  # collect last value effect of the last collection step
         returns = compute_gae(next_value, rewards, masks, values)
-        returns = torch.cat(returns).detach()  # concatenates along existing dimension and detach the tensor from the network graph, making the tensor no gradient
-        log_probs = torch.cat(log_probs).detach()
-        values = torch.cat(values).detach()
-        states = torch.cat(states)
-        actions = torch.cat(actions)
+
+        states.append(next_state)
+        returns = torch.stack(returns).detach()  # concatenates along existing dimension and detach the tensor from the network graph, making the tensor no gradient
+        log_probs = torch.stack(log_probs).detach()
+        values = torch.stack(values).detach()
+        states = torch.stack(states)
+        actions = torch.stack(actions)
         advantages = returns - values  # compute advantage for each action
         advantages = normalize(advantages)  # compute the normalization of the vector to make uniform values
-        loss, actor_loss, critic_loss, entropy_loss = ppo_update(
-            model, optimizer, states, actions, log_probs, returns, advantages, seq)
+        results = ppo_update(model, optimizer, states, actions, log_probs, returns, advantages, seq)
         train_epoch += 1
 
         total_steps = train_epoch * T
-        writer.add_scalar('Loss/Total Loss', loss.item(), total_steps)
-        writer.add_scalar('Loss/Actor Loss', actor_loss.item(), total_steps)
-        writer.add_scalar('Loss/Critic Loss', critic_loss.item(), total_steps)
-        writer.add_scalar('Loss/Entropy Loss', entropy_loss.item(), total_steps)
+        writer.add_scalar('Loss/Total Loss', results['loss'].item(), total_steps)
+        writer.add_scalar('Loss/Actor Loss', results['actor_loss'].item(), total_steps)
+        writer.add_scalar('Loss/Critic Loss', results['critic_loss'].item(), total_steps)
+        writer.add_scalar('Loss/Entropy Loss', results['entropy_loss'].item(), total_steps)
+        writer.add_scalar('Loss/Predict Loss', results['pred_loss'].item(), total_steps)
+
+        writer.add_scalar('Grad/Max', results['grad_max'].item(), total_steps)
+        writer.add_scalar('Grad/Critic', results['grad_critic'].item(), total_steps)
+        writer.add_scalar('Grad/Actor', results['grad_actor'].item(), total_steps)
+        writer.add_scalar('Grad/Entropy', results['grad_entropy'].item(), total_steps)
+        writer.add_scalar('Grad/Pred', results['grad_pred'].item(), total_steps)
+        writer.add_scalar('Grad/Total', results['grad_total'].item(), total_steps)
 
         if train_epoch % T_EPOCHS == 0:  # do a test every T_EPOCHS times
             model.eval()
@@ -507,7 +568,7 @@ def train(load_from=None):
     train_epoch = 0
     best_reward = None
 
-    summary(model, input_size=[(1, 84, 84), (1, H_SIZE)], batch_dim=0, dtypes=[torch.float, torch.float])
+    # summary(model, input_size=[(1, 84, 84), (1, H_SIZE)], batch_dim=0, dtypes=[torch.float, torch.float])
 
     if load_from is not None:
         checkpoint = torch.load(load_from, map_location=None if use_cuda else torch.device('cpu'))
@@ -535,11 +596,12 @@ def test_env(env, model, device):
 
     # set rolling_size=0
     seq = Seq(seq_len=LOOK_BACK_SIZE, batch_size=1, rolling_size=0, feature_size=EMBED_DIM, device=device)
-    fixed_idx = np.asarray([j for j in range(1)])
+    fixed_idx_0 = np.asarray([0 for j in range(1)])
+    fixed_idx_1 = np.asarray([j for j in range(1)])
 
     while not done:
         state = torch.FloatTensor(state).unsqueeze(0).to(device)
-        dist, _, feature = model(state, *seq.fetch_seq(fixed_idx))
+        dist, _, feature, _ = model(state, *seq.fetch_seq(fixed_idx_0, fixed_idx_1))
         action = dist.sample().cpu().numpy()[0]
         next_state, reward, done, _, _ = env.step(action)
         next_state = grey_crop_resize(next_state)
