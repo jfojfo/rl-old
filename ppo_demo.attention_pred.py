@@ -27,7 +27,7 @@ L_GAE = 0.95 # lambda param for GAE
 E_CLIP = 0.2 # clipping coefficient
 C_1 = 0.5 # squared loss coefficient
 C_2 = 0.01 # entropy coefficient
-C_3 = 1 # predict loss coefficient
+C_3 = 0.1 # predict loss coefficient
 N = 8 # simultaneous processing environments
 T = 256 # PPO steps to get envs data
 M = 64 # mini batch size
@@ -568,7 +568,7 @@ def train(load_from=None):
     train_epoch = 0
     best_reward = None
 
-    # summary(model, input_size=[(1, 84, 84), (1, H_SIZE)], batch_dim=0, dtypes=[torch.float, torch.float])
+    summary(model, input_size=[(1, 84, 84), (1, H_SIZE)], batch_dim=0, dtypes=[torch.float, torch.float])
 
     if load_from is not None:
         checkpoint = torch.load(load_from, map_location=None if use_cuda else torch.device('cpu'))
