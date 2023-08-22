@@ -40,7 +40,7 @@ EMBED_DIM = H_SIZE
 LOOK_BACK_SIZE = 16
 
 MODEL_DIR = 'models'
-MODEL = 'ppo_demo.attention_pred_16_c3_1'
+MODEL = 'ppo_demo.attention_pred_16_c3_0.1'
 # ENV_ID = 'Pong-v0'
 ENV_ID = 'PongDeterministic-v0'
 
@@ -366,7 +366,8 @@ def ppo_update(model, optimizer, states, actions, log_probs, returns, advantages
             entropy_loss = -dist.entropy().mean()
 
             feature_next = feature_next.detach()
-            pred_loss = F.mse_loss(pred_feature_next, feature_next, reduction='none').sum(dim=1).mean()
+            # pred_loss = F.mse_loss(pred_feature_next, feature_next, reduction='none').sum(dim=1).mean()
+            pred_loss = F.binary_cross_entropy(pred_feature_next, feature_next, reduction='none').sum(dim=1).mean()
 
             loss = C_1 * critic_loss + actor_loss + C_2 * entropy_loss + C_3 * pred_loss
 
