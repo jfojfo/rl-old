@@ -334,7 +334,7 @@ def ppo_iter(states, actions, log_probs, returns, advantages, seq):
         # (Len, Batch, ...)
         rand_ids_0 = np.random.randint(0, actions.size(0), M)
         rand_ids_1 = np.random.randint(0, actions.size(1), M)
-        reverse_ids_0 = actions.size(0) - rand_ids_0
+        reverse_ids_0 = actions.size(0) - rand_ids_0 # one more item: 0->256, not 255
         seq_feature, seq_mask = seq.fetch_seq(reverse_ids_0, rand_ids_1)
         yield states[rand_ids_0, rand_ids_1, :], \
               actions[rand_ids_0, rand_ids_1, :], \
@@ -414,7 +414,7 @@ class Seq:
         sub_mask = np.stack([mask[idx0 + i, idx1] * 1 for i in range(self.seq_len)], axis=0)
         cum_mask = 1 - np.minimum.accumulate(sub_mask, axis=0)
         cum_mask = cum_mask.squeeze(axis=2).T  # (batch, seq)
-        cum_mask[cum_mask == 1] = -1e-7
+        cum_mask[cum_mask == 1] = -1e7
         return torch.from_numpy(sub_seq).to(self.device), torch.from_numpy(cum_mask).to(self.device)
 
     def _roll_seq(self, seq, data, order=0):
@@ -567,7 +567,7 @@ def train(load_from=None):
     train_epoch = 0
     best_reward = None
 
-    summary(model, input_size=[(1, 84, 84), (1, H_SIZE)], batch_dim=0, dtypes=[torch.float, torch.float])
+    # summary(model, input_size=[(1, 84, 84), (1, H_SIZE)], batch_dim=0, dtypes=[torch.float, torch.float])
 
     if load_from is not None:
         checkpoint = torch.load(load_from, map_location=None if use_cuda else torch.device('cpu'))
