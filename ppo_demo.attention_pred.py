@@ -27,7 +27,7 @@ L_GAE = 0.95 # lambda param for GAE
 E_CLIP = 0.2 # clipping coefficient
 C_1 = 0.5 # squared loss coefficient
 C_2 = 0.01 # entropy coefficient
-C_3 = 0.1 # predict loss coefficient
+C_3 = 1 # predict loss coefficient
 N = 8 # simultaneous processing environments
 T = 256 # PPO steps to get envs data
 M = 64 # mini batch size
@@ -40,7 +40,7 @@ EMBED_DIM = H_SIZE
 LOOK_BACK_SIZE = 16
 
 MODEL_DIR = 'models'
-MODEL = 'ppo_demo.attention_pred_16_c3_0.1'
+MODEL = f'ppo_demo.attention_pred_{LOOK_BACK_SIZE}_c3_{C_3}_fixed'
 # ENV_ID = 'Pong-v0'
 ENV_ID = 'PongDeterministic-v0'
 
@@ -178,7 +178,7 @@ class ActorCritic(nn.Module):
             ('act3', nn.ReLU()),
             ('flatten', nn.Flatten()),
             ('linear', nn.Linear(in_features=32 * 4 * 4, out_features=hidden_size)),
-            ('act', nn.Sigmoid()),
+            ('act', nn.Softmax(dim=-1)),
         ]))
 
         # self.attention = nn.MultiheadAttention(embed_dim, 16)
@@ -188,8 +188,7 @@ class ActorCritic(nn.Module):
         self.pred_next = nn.Sequential(
             nn.Linear(in_features=hidden_size + num_outputs, out_features=hidden_size * 4),
             nn.ReLU(),
-            nn.Linear(in_features=hidden_size * 4, out_features=hidden_size),
-            nn.Sigmoid(),
+            nn.Linear(in_features=hidden_size * 4, out_features=hidden_size),  # logits
         )
 
         self.critic = nn.Sequential(  # The “Critic” estimates the value function
@@ -208,9 +207,14 @@ class ActorCritic(nn.Module):
         feature = self.feature(x)
         # memory_pos = self.pos_encode(memory)
         query = feature.unsqueeze(dim=0) # sequence first
+        memory_concat = torch.cat([query.detach(), memory], dim=0)
+        if mask is not None:
+            mask_concat = torch.cat([torch.zeros((mask.shape[0], 1), dtype=mask.dtype).to(mask.device), mask], dim=1)
+        else:
+            mask_concat = None
         # query_pos = self.pos_encode(query)
         # attention, scores = self.attention(query_pos, memory_pos, memory_pos, src_key_padding_mask=mask)
-        attention, scores = self.attention(query, memory, memory, src_key_padding_mask=mask)
+        attention, scores = self.attention(query, memory_concat, memory_concat, src_key_padding_mask=mask_concat)
         attn_out = attention.squeeze(dim=0)
         value = self.critic(attn_out)
         probs = self.actor(attn_out)
@@ -221,8 +225,8 @@ class ActorCritic(nn.Module):
     def pred_next_feature(self, attn_out, action, x_next):
         feature_next = self.feature(x_next)
         action_one_hot = F.one_hot(action.squeeze(dim=1), self.num_outputs).to(torch.float32)
-        pred_feature_next = self.pred_next(torch.concat((attn_out, action_one_hot), dim=1))
-        return pred_feature_next, feature_next
+        pred_feature_next_logits = self.pred_next(torch.concat((attn_out, action_one_hot), dim=1))
+        return pred_feature_next_logits, feature_next
 
 
 # class SeqTorch:
@@ -336,7 +340,7 @@ def ppo_iter(states, actions, log_probs, returns, advantages, seq):
         # (Len, Batch, ...)
         rand_ids_0 = np.random.randint(0, actions.size(0), M)
         rand_ids_1 = np.random.randint(0, actions.size(1), M)
-        reverse_ids_0 = actions.size(0) - rand_ids_0
+        reverse_ids_0 = actions.size(0) - rand_ids_0 # one more item: 0->256, not 255
         seq_feature, seq_mask = seq.fetch_seq(reverse_ids_0, rand_ids_1)
         yield states[rand_ids_0, rand_ids_1, :], \
               actions[rand_ids_0, rand_ids_1, :], \
@@ -353,7 +357,7 @@ def ppo_update(model, optimizer, states, actions, log_probs, returns, advantages
     for _ in range(K):
         for state, action, old_log_probs, return_, advantage, next_state, seq_feature, seq_mask in ppo_iter(states, actions, log_probs, returns, advantages, seq):
             dist, value, _, attn_out = model(state, seq_feature, seq_mask)
-            pred_feature_next, feature_next = model.pred_next_feature(attn_out, action, next_state)
+            pred_feature_next_logits, feature_next = model.pred_next_feature(attn_out, action, next_state)
 
             action = action.reshape(1, len(action)) # take the relative action and take the column
             new_log_probs = dist.log_prob(action)
@@ -367,7 +371,10 @@ def ppo_update(model, optimizer, states, actions, log_probs, returns, advantages
 
             feature_next = feature_next.detach()
             # pred_loss = F.mse_loss(pred_feature_next, feature_next, reduction='none').sum(dim=1).mean()
-            pred_loss = F.binary_cross_entropy(pred_feature_next, feature_next, reduction='none').sum(dim=1).mean()
+
+            # note: cross_entropy and binary_cross_entropy takes logits as input, not softmax/sigmoid result as input
+            # cross_entropy return shape: (B, )
+            pred_loss = F.cross_entropy(pred_feature_next_logits, feature_next, reduction='none').mean()
 
             loss = C_1 * critic_loss + actor_loss + C_2 * entropy_loss + C_3 * pred_loss
 
@@ -406,7 +413,7 @@ class Seq:
         self.rolling_size = rolling_size
         self.device = device
         self.seq_features = np.zeros([seq_len + rolling_size, batch_size, feature_size], dtype=np.float32)
-        self.seq_masks = np.zeros([seq_len + rolling_size, batch_size, 1], dtype=np.float32)
+        self.seq_masks = np.zeros([seq_len + rolling_size, batch_size, 1], dtype=np.float32)  # 1 running, 0 done
 
     def fetch_seq(self, idx0, idx1):
         seq = self.seq_features
@@ -416,7 +423,7 @@ class Seq:
         sub_mask = np.stack([mask[idx0 + i, idx1] * 1 for i in range(self.seq_len)], axis=0)
         cum_mask = 1 - np.minimum.accumulate(sub_mask, axis=0)
         cum_mask = cum_mask.squeeze(axis=2).T  # (batch, seq)
-        cum_mask[cum_mask == 1] = -1e-7
+        cum_mask[cum_mask == 1] = -1e9
         return torch.from_numpy(sub_seq).to(self.device), torch.from_numpy(cum_mask).to(self.device)
 
     def _roll_seq(self, seq, data, order=0):
