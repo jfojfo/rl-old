@@ -31,7 +31,7 @@ E_CLIP = 0.2 # clipping coefficient
 C_1 = 0.5 # squared loss coefficient
 C_2 = 0.01 # entropy coefficient
 C_3 = 0.1 # image reconstruction loss coefficient
-N = 8 # simultaneous processing environments
+N = 2 # simultaneous processing environments
 T = 256 # PPO steps to get envs data
 M = 64 # mini batch size
 K = 10 # PPO epochs repeated to optimise
@@ -199,7 +199,7 @@ class ActorCritic(nn.Module):
         attn_out = attention.permute(1, 0, 2)  # (B, n, embed_dim)
         attn_out = attn_out.view(attn_out.shape[0], attn_out.shape[1], attn_out.shape[2], 1)  # (B,n,h=embed_dim,w=1)
         feature = self.feature(attn_out)  # 模拟query查询memory得到特征，(B,1,h=embed_dim,w=1)
-        feature = feature.view(feature.shape[0], -1)
+        feature = feature.view(feature.shape[0], -1)  # (B, embed_dim)
         value = self.critic(feature)
         probs = self.actor(feature)
         dist = Categorical(probs)
