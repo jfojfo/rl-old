@@ -180,7 +180,7 @@ class ActorCritic(nn.Module):
             nn.Flatten(),
         )
 
-        # self.encode_pos = nn.Linear(in_features=embed_dim + NUM_Y + NUM_X, out_features=embed_dim)
+        self.encode_pos = nn.Linear(in_features=embed_dim + NUM_Y + NUM_X, out_features=embed_dim)
         # self.focus = nn.Sequential(
         #     nn.Linear(in_features=embed_dim * NUM_Y * NUM_X, out_features=NUM_Y * NUM_X),
         #     nn.Sigmoid(),
@@ -224,18 +224,19 @@ class ActorCritic(nn.Module):
     def forward(self, x):
         patches = self.get_patches(x, PATCH_H, PATCH_W, PATCH_H, PATCH_W)
         patches_feature = self.patches_feature(patches)  # (Bxn, embed_dim)
-        # patches_feature_pos = self.attach_pos(patches_feature, NUM_Y, NUM_X)  # (Bxn, embed_dim+NUM_X+NUM_Y)
-        # patches_feature_encode_pos = self.encode_pos(patches_feature_pos)  # (Bxn, embed_dim)
-        #
+        patches_feature_pos = self.attach_pos(patches_feature, NUM_Y, NUM_X)  # (Bxn, embed_dim+NUM_X+NUM_Y)
+        patches_feature_encode_pos = self.encode_pos(patches_feature_pos)  # (Bxn, embed_dim)
+
         # patches_feature_encode_pos_flatten = patches_feature_encode_pos.view(x.shape[0], -1)  # (B, n*embed_dim)
         # patches_feature_focus = self.focus(patches_feature_encode_pos_flatten)  # (B, n)
         # topk_values, topk_indices = patches_feature_focus.topk(NUM_Y, dim=1)  # (B, NUM_Y)
-        #
+
         # patches_feature_batch = patches_feature.view(x.shape[0], -1, patches_feature.shape[-1])  # (B, n, embed_dim)
         # patches_feature_topk = patches_feature_batch[torch.arange(x.shape[0]).unsqueeze(1), topk_indices]
         # patches_feature_topk_flatten = patches_feature_topk.view(x.shape[0], -1)  # (B, n*embed_dim)
 
-        feature = self.feature(patches_feature.view(x.shape[0], -1))
+        patches_feature_flatten = patches_feature_encode_pos.view(x.shape[0], -1)  # (B, n*embed_dim)
+        feature = self.feature(patches_feature_flatten)
         value = self.critic(feature)
         probs = self.actor(feature)
         dist = Categorical(probs)
