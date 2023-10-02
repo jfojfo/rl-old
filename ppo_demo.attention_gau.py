@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.optim as optim
 from PIL import Image
 from torch.distributions import Categorical
-from torch.utils.tensorboard import SummaryWriter
+from utils import MySummaryWriter
 from stable_baselines3.common.vec_env import VecVideoRecorder, SubprocVecEnv
 import argparse
 from torchinfo import summary
@@ -43,6 +43,8 @@ MODEL_DIR = 'models'
 MODEL = 'ppo_demo.attention_xl'
 # ENV_ID = 'Pong-v0'
 ENV_ID = 'PongDeterministic-v0'
+
+writer = None
 
 
 class MySelfAttention(nn.Module):
@@ -200,20 +202,25 @@ class ActorCritic(nn.Module):
             nn.Softmax(dim=1),
         )
 
-    def forward(self, x, memory, mask=None):
+    def forward(self, x, memory, mask=None, return_score=False):
         feature = self.feature(x)
         query = feature.unsqueeze(dim=0) # sequence first
         out = query
         feature_attn_list = [out.squeeze(dim=0)]
+        scores_list = []
         for i in range(self.layer_num):
             attn_layer = self.layers[i]
             out, scores = attn_layer(out, memory[i], src_key_padding_mask=mask[i])
             feature_attn_list.append(out.squeeze(dim=0))
+            scores_list.append(scores)
         attn_out = out.squeeze(dim=0)
         value = self.critic(attn_out)
         probs = self.actor(attn_out)
         dist = Categorical(probs)
-        return dist, value, feature_attn_list
+        if return_score:
+            return dist, value, feature_attn_list, scores_list
+        else:
+            return dist, value, feature_attn_list
 
 
 # class SeqTorch:
@@ -341,33 +348,40 @@ def ppo_update(model, optimizer, states, actions, log_probs, returns, advantages
             actor_loss = - torch.min(surr1, surr2).mean()
             critic_loss = (return_ - value).pow(2).mean()
             entropy_loss = -dist.entropy().mean()
-
             loss = C_1 * critic_loss + actor_loss + C_2 * entropy_loss # loss function clip+vs+f
 
-            optimizer.zero_grad()
-            (C_1 * critic_loss).backward(retain_graph=True)
-            grad_critic = params_feature.grad.mean(), params_feature.grad.std()
+            if not writer.check_steps():
+                optimizer.zero_grad()  # in PyTorch, we need to set the gradients to zero before starting to do backpropragation because PyTorch accumulates the gradients on subsequent backward passes.
+                loss.backward()  # computes dloss/dx for every parameter x which has requires_grad=True. These are accumulated into x.grad for every parameter x
+                optimizer.step()  # performs the parameters update based on the current gradient and the update rule
+            else:
+                optimizer.zero_grad()
+                (C_1 * critic_loss).backward(retain_graph=True)
+                grad_critic = params_feature.grad.mean(), params_feature.grad.std()
 
-            optimizer.zero_grad()
-            actor_loss.backward(retain_graph=True)
-            grad_actor = params_feature.grad.mean(), params_feature.grad.std()
+                optimizer.zero_grad()
+                actor_loss.backward(retain_graph=True)
+                grad_actor = params_feature.grad.mean(), params_feature.grad.std()
 
-            optimizer.zero_grad()
-            (- C_2 * entropy_loss).backward(retain_graph=True)
-            grad_entropy = params_feature.grad.mean(), params_feature.grad.std()
+                optimizer.zero_grad()
+                (- C_2 * entropy_loss).backward(retain_graph=True)
+                grad_entropy = params_feature.grad.mean(), params_feature.grad.std()
 
-            optimizer.zero_grad() # in PyTorch, we need to set the gradients to zero before starting to do backpropragation because PyTorch accumulates the gradients on subsequent backward passes.
-            loss.backward() # computes dloss/dx for every parameter x which has requires_grad=True. These are accumulated into x.grad for every parameter x
+                optimizer.zero_grad()
+                loss.backward()
+                grad_total = params_feature.grad.mean(), params_feature.grad.std()
+                grad_max = params_feature.grad.abs().max()
 
-            grad_total = params_feature.grad.mean(), params_feature.grad.std()
-            grad_max = params_feature.grad.abs().max()
+                optimizer.step()
 
-            optimizer.step() # performs the parameters update based on the current gradient and the update rule
+    if writer.check_steps():
+        writer.add_scalar('Grad/Critic', grad_critic[0].item(), writer.global_steps)
+        writer.add_scalar('Grad/Actor', grad_actor[0].item(), writer.global_steps)
+        writer.add_scalar('Grad/Entropy', grad_entropy[0].item(), writer.global_steps)
+        writer.add_scalar('Grad/Max', grad_max.item(), writer.global_steps)
+        writer.add_scalar('Grad/Total', grad_total[0].item(), writer.global_steps)
 
-    return {'loss': loss, 'actor_loss': actor_loss, 'critic_loss': critic_loss, 'entropy_loss': entropy_loss,
-            'grad_critic': grad_critic[0], 'grad_actor': grad_actor[0], 'grad_entropy': grad_entropy[0],
-            'grad_total': grad_total[0], 'grad_max': grad_max,
-            }
+    return {'loss': loss, 'actor_loss': actor_loss, 'critic_loss': critic_loss, 'entropy_loss': entropy_loss}
 
 
 class Seq:
@@ -452,7 +466,8 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
         conv.register_forward_hook(hook_fn)
         conv_models.append(conv)
 
-    writer = SummaryWriter(comment=f'.{MODEL}.{ENV_ID}')
+    global writer
+    writer = MySummaryWriter(0, T_EPOCHS * T * 2, comment=f'.{MODEL}.{ENV_ID}')
     env_test = gym.make(ENV_ID, render_mode='rgb_array')
 
     state = envs.reset()
@@ -472,10 +487,11 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
         actions = []
         rewards = []
         masks = []
+        attn_scores = []
 
         for i in range(T):
             state = torch.FloatTensor(state).to(device)
-            dist, value, feature_attn_list = model(state, *_get_seq_mem_mask(seq_list, fixed_idx))
+            dist, value, feature_attn_list, scores_list = model(state, *_get_seq_mem_mask(seq_list, fixed_idx), return_score=True)
             action = dist.sample().to(device)
             next_state, reward, done, _ = envs.step(action.cpu().numpy())
             next_state = grey_crop_resize_batch(next_state)  # simplify perceptions (grayscale-> crop-> resize) to train CNN
@@ -490,6 +506,8 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
             states.append(state)
             state = next_state
             _roll_seq_mem_mask(seq_list, feature_attn_list, 1 - done[:, np.newaxis])
+
+            attn_scores.append(torch.concat([score[0].detach().cpu() for score in scores_list]))
 
             total_reward_1_env += reward[0]
             steps_1_env += 1
@@ -510,30 +528,31 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
         actions = torch.cat(actions)
         advantages = returns - values  # compute advantage for each action
         advantages = normalize(advantages)  # compute the normalization of the vector to make uniform values
+
+        train_epoch += 1
+        total_steps = train_epoch * T
+        writer.update_global_step(total_steps)
+
         results = ppo_update(
             model, optimizer, states, actions, log_probs, returns, advantages, seq_list)
-        train_epoch += 1
-
-        total_steps = train_epoch * T
 
         writer.add_scalar('Loss/Total Loss', results['loss'].item(), total_steps)
         writer.add_scalar('Loss/Actor Loss', results['actor_loss'].item(), total_steps)
         writer.add_scalar('Loss/Critic Loss', results['critic_loss'].item(), total_steps)
         writer.add_scalar('Loss/Entropy Loss', results['entropy_loss'].item(), total_steps)
 
-        writer.add_scalar('Grad/Critic', results['grad_critic'].item(), total_steps)
-        writer.add_scalar('Grad/Actor', results['grad_actor'].item(), total_steps)
-        writer.add_scalar('Grad/Entropy', results['grad_entropy'].item(), total_steps)
-        writer.add_scalar('Grad/Max', results['grad_max'].item(), total_steps)
-        writer.add_scalar('Grad/Total', results['grad_total'].item(), total_steps)
+        if writer.check_steps():
+            attn_scores = torch.stack(attn_scores).permute(1, 0, 2)
+            for k in range(attn_scores.shape[0]):
+                writer.add_image(f"score/{k}", attn_scores[k].unsqueeze(0), total_steps)
 
-        if train_epoch % T_EPOCHS == 0:  # do a test every T_EPOCHS times
             for i in range(num_convs):
                 b, c, h, w = conv_models[i].feature_map.shape
                 feature_map = conv_models[i].feature_map[:16].transpose(0, 1).unsqueeze(dim=2).reshape(-1, 1, h, w)
                 feature_map_grids = torchvision.utils.make_grid(feature_map, nrow=16, padding=1, normalize=True)
                 writer.add_image(f"FeatureMap/conv{i + 1}", feature_map_grids.detach().cpu().numpy(), total_steps)
 
+        if train_epoch % T_EPOCHS == 0:  # do a test every T_EPOCHS times
             model.eval()
             test_reward = np.mean([test_env(env_test, model, device) for _ in range(N_TESTS)])  # do N_TESTS tests and takes the mean reward
             model.train()
