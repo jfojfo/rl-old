@@ -40,11 +40,11 @@ LOOK_BACK_SIZE = 256
 NUM_ATTN_LAYERS = 4
 
 MODEL_DIR = 'models'
-MODEL = 'ppo_demo.attention_xl'
+MODEL = 'ppo_demo.attention_gtrxl_mem'
 # ENV_ID = 'Pong-v0'
 ENV_ID = 'PongDeterministic-v0'
 
-writer = None
+writer: MySummaryWriter = None
 
 
 class MySelfAttention(nn.Module):
@@ -375,11 +375,11 @@ def ppo_update(model, optimizer, states, actions, log_probs, returns, advantages
                 optimizer.step()
 
     if writer.check_steps():
-        writer.add_scalar('Grad/Critic', grad_critic[0].item(), writer.global_steps)
-        writer.add_scalar('Grad/Actor', grad_actor[0].item(), writer.global_steps)
-        writer.add_scalar('Grad/Entropy', grad_entropy[0].item(), writer.global_steps)
-        writer.add_scalar('Grad/Max', grad_max.item(), writer.global_steps)
-        writer.add_scalar('Grad/Total', grad_total[0].item(), writer.global_steps)
+        writer.add_scalar('Grad/Critic', grad_critic[0].item(), writer.global_step)
+        writer.add_scalar('Grad/Actor', grad_actor[0].item(), writer.global_step)
+        writer.add_scalar('Grad/Entropy', grad_entropy[0].item(), writer.global_step)
+        writer.add_scalar('Grad/Total', grad_total[0].item(), writer.global_step)
+        writer.add_scalar('Grad/Max', grad_max.item(), writer.global_step)
 
     return {'loss': loss, 'actor_loss': actor_loss, 'critic_loss': critic_loss, 'entropy_loss': entropy_loss}
 
