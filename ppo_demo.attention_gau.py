@@ -13,6 +13,8 @@ import argparse
 from torchinfo import summary
 import torch.nn.functional as F
 import torchvision
+from torch import einsum
+from einops import rearrange
 
 
 #
@@ -40,11 +42,119 @@ LOOK_BACK_SIZE = 256
 NUM_ATTN_LAYERS = 4
 
 MODEL_DIR = 'models'
-MODEL = 'ppo_demo.attention_xl'
+MODEL = 'ppo_demo.attention_gau'
 # ENV_ID = 'Pong-v0'
 ENV_ID = 'PongDeterministic-v0'
 
 writer: MySummaryWriter = None
+
+
+
+def exists(val):
+    return val is not None
+
+class GAU(nn.Module):
+    def __init__(
+        self,
+        dim,
+        query_key_dim = 128,
+        expansion_factor = 2.,
+        add_residual = True,
+        causal = False,
+        dropout = 0.,
+        laplace_attn_fn = False,
+        rel_pos_bias = False,
+        norm_klass = nn.LayerNorm
+    ):
+        super().__init__()
+        hidden_dim = int(expansion_factor * dim)
+
+        self.norm = norm_klass(dim)
+        self.causal = causal
+        self.dropout = nn.Dropout(dropout)
+
+        # self.attn_fn = ReLUSquared() if not laplace_attn_fn else LaplacianAttnFn()
+        self.attn_fn = nn.Softmax(dim=-1)
+
+        # self.rel_pos_bias = T5RelativePositionBias(scale = dim ** 0.5, causal = causal)
+        self.rel_pos_bias = None
+
+        self.to_gate = nn.Sequential(
+            nn.Linear(dim, hidden_dim),
+            nn.SiLU()
+        )
+        self.to_v = nn.Linear(dim, hidden_dim)
+
+        self.to_q = nn.Linear(dim, query_key_dim)
+        self.to_k = nn.Linear(dim, query_key_dim)
+
+        # self.offsetscale = OffsetScale(query_key_dim, heads = 2)
+
+        self.to_out = nn.Sequential(
+            nn.Linear(hidden_dim, dim),
+            nn.Dropout(dropout)
+        )
+
+        self.add_residual = add_residual
+
+    def forward(
+        self,
+        x,  # sequence first
+        mem,  # sequence first
+        rel_pos_bias = None,
+        src_key_padding_mask = None,  # (B,L)
+        attn_mask = None
+    ):
+        seq_len, device = x.shape[-2], x.device
+
+        normed_x = self.norm(x)
+        normed_mem = self.norm(mem)
+        v, gate = self.to_v(normed_mem), self.to_gate(normed_x)
+
+        # qk = self.to_qk(normed_x)
+        # q, k = self.offsetscale(qk)
+        q, k = self.to_q(normed_x), self.to_k(normed_mem)
+
+        sim = einsum('i b d, j b d -> b i j', q, k)
+
+        if exists(self.rel_pos_bias):
+            sim = sim + self.rel_pos_bias(sim)
+
+        if exists(rel_pos_bias):
+            sim = sim + rel_pos_bias
+
+        # attn = self.attn_fn(sim / seq_len)
+        sim = sim / (q.shape[-1] ** 0.5)
+
+        if exists(src_key_padding_mask):
+            if torch.is_floating_point(src_key_padding_mask):
+                src_key_padding_mask = rearrange(src_key_padding_mask, 'b j -> b 1 j')
+                sim = sim + src_key_padding_mask
+            elif src_key_padding_mask.dtype == torch.bool:
+                sim = sim.masked_fill(~src_key_padding_mask, float("-inf"))
+            else:
+                raise AssertionError("only bool and floating types for key_padding_mask are supported")
+
+        attn = self.attn_fn(sim)
+        attn = self.dropout(attn)
+
+        if exists(attn_mask):
+            attn_mask = rearrange(attn_mask, 'b j -> b 1 j')
+            attn = attn.masked_fill(~attn_mask, 0.)
+
+        if self.causal:
+            causal_mask = torch.ones((seq_len, seq_len), dtype = torch.bool, device = device).triu(1)
+            attn = attn.masked_fill(causal_mask, 0.)
+
+        out = einsum('b i j, j b d -> i b d', attn, v)
+        out = out * gate
+
+        out = self.to_out(out)
+
+        if self.add_residual:
+            out = out + x
+
+        return out, attn
 
 
 class MySelfAttention(nn.Module):
@@ -187,7 +297,7 @@ class ActorCritic(nn.Module):
         self.layer_num = NUM_ATTN_LAYERS
         layers = []
         for i in range(self.layer_num):
-            layers.append(MyTransformerEncoderLayer(embed_dim, 16, embed_dim * 2))
+            layers.append(GAU(embed_dim, 64, 2))
         self.layers = nn.Sequential(*layers)
 
         self.critic = nn.Sequential(  # The “Critic” estimates the value function
@@ -210,7 +320,14 @@ class ActorCritic(nn.Module):
         scores_list = []
         for i in range(self.layer_num):
             attn_layer = self.layers[i]
-            out, scores = attn_layer(out, memory[i], src_key_padding_mask=mask[i])
+
+            memory_concat = torch.cat([out.detach(), memory[i]], dim=0)
+            if mask is not None:
+                mask_concat = torch.cat([torch.zeros((mask[i].shape[0], 1), dtype=mask[i].dtype).to(mask[i].device), mask[i]], dim=1)
+            else:
+                mask_concat = None
+
+            out, scores = attn_layer(out, memory_concat, src_key_padding_mask=mask_concat)
             feature_attn_list.append(out.squeeze(dim=0))
             scores_list.append(scores)
         attn_out = out.squeeze(dim=0)
