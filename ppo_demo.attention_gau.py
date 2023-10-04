@@ -42,7 +42,7 @@ LOOK_BACK_SIZE = 256
 NUM_ATTN_LAYERS = 4
 
 MODEL_DIR = 'models'
-MODEL = 'ppo_demo.attention_gau'
+MODEL = f'ppo_demo.attention_gau_look_back_{LOOK_BACK_SIZE}_attn_layers_{NUM_ATTN_LAYERS}'
 # ENV_ID = 'Pong-v0'
 ENV_ID = 'PongDeterministic-v0'
 
@@ -321,7 +321,7 @@ class ActorCritic(nn.Module):
         for i in range(self.layer_num):
             attn_layer = self.layers[i]
 
-            memory_concat = torch.cat([out.detach(), memory[i]], dim=0)
+            memory_concat = torch.cat([out, memory[i]], dim=0)
             if mask is not None:
                 mask_concat = torch.cat([torch.zeros((mask[i].shape[0], 1), dtype=mask[i].dtype).to(mask[i].device), mask[i]], dim=1)
             else:
