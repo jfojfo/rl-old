@@ -364,7 +364,7 @@ class Seq:
         sub_mask = np.concatenate(m_list, axis=1)
         cum_mask = 1 - np.minimum.accumulate(sub_mask, axis=0)
         cum_mask = cum_mask.squeeze(axis=2).T  # (batch, seq)
-        cum_mask[cum_mask == 1] = -1e-7
+        cum_mask[cum_mask == 1] = -np.Inf
         return torch.from_numpy(sub_seq).to(self.device), torch.from_numpy(cum_mask).to(self.device)
 
     def _roll_seq(self, seq, data, order=0):
