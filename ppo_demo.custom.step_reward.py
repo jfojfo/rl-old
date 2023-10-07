@@ -38,7 +38,7 @@ TRANSFER_LEARNING = False
 EMBED_DIM = H_SIZE
 LOOK_BACK_SIZE = 256
 NUM_ATTN_LAYERS = 4
-STEP_REWARD = 0.001
+STEP_REWARD = 0.002
 
 MODEL_DIR = 'models'
 MODEL = f'ppo_demo.custom.step_reward_{STEP_REWARD}'
@@ -410,7 +410,6 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
             dist, value = model(state)
             action = dist.sample().to(device)
             next_state, reward, done, _ = envs.step(action.cpu().numpy())
-            reward += STEP_REWARD
             next_state = grey_crop_resize_batch(next_state)  # simplify perceptions (grayscale-> crop-> resize) to train CNN
             log_prob = dist.log_prob(action)  # needed to compute probability ratio r(theta) that prevent policy to vary too much probability related to each action (make the computations more robust)
             log_prob_vect = log_prob.reshape(len(log_prob), 1)  # transpose from row to column
@@ -418,7 +417,7 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
             action_vect = action.reshape(len(action), 1)  # transpose from row to column
             actions.append(action_vect)
             values.append(value)
-            rewards.append(torch.FloatTensor(reward).unsqueeze(1).to(device))
+            rewards.append(torch.FloatTensor(reward + STEP_REWARD).unsqueeze(1).to(device))
             masks.append(torch.FloatTensor(1 - done).unsqueeze(1).to(device))
             states.append(state)
             state = next_state
