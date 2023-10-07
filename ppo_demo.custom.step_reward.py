@@ -27,7 +27,7 @@ L_GAE = 0.95 # lambda param for GAE
 E_CLIP = 0.2 # clipping coefficient
 C_1 = 0.5 # squared loss coefficient
 C_2 = 0.01 # entropy coefficient
-N = 2 # simultaneous processing environments
+N = 8 # simultaneous processing environments
 T = 256 # PPO steps to get envs data
 M = 64 # mini batch size
 K = 10 # PPO epochs repeated to optimise
@@ -41,7 +41,7 @@ NUM_ATTN_LAYERS = 4
 STEP_REWARD = 0.001
 
 MODEL_DIR = 'models'
-MODEL = 'ppo_demo.custom.step_reward'
+MODEL = f'ppo_demo.custom.step_reward_{STEP_REWARD}'
 # ENV_ID = 'Pong-v0'
 ENV_ID = 'PongDeterministic-v0'
 
@@ -410,6 +410,7 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
             dist, value = model(state)
             action = dist.sample().to(device)
             next_state, reward, done, _ = envs.step(action.cpu().numpy())
+            reward += STEP_REWARD
             next_state = grey_crop_resize_batch(next_state)  # simplify perceptions (grayscale-> crop-> resize) to train CNN
             log_prob = dist.log_prob(action)  # needed to compute probability ratio r(theta) that prevent policy to vary too much probability related to each action (make the computations more robust)
             log_prob_vect = log_prob.reshape(len(log_prob), 1)  # transpose from row to column
