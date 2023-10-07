@@ -20,27 +20,28 @@ import torchvision
 #
 
 
-H_SIZE = 128 # hidden size, linear units of the output layer
+H_SIZE = 256 # hidden size, linear units of the output layer
 L_RATE = 1e-4 # learning rate, gradient coefficient for CNN weight update
 G_GAE = 0.99 # gamma param for GAE
 L_GAE = 0.95 # lambda param for GAE
 E_CLIP = 0.2 # clipping coefficient
 C_1 = 0.5 # squared loss coefficient
 C_2 = 0.01 # entropy coefficient
-N = 8 # simultaneous processing environments
+N = 2 # simultaneous processing environments
 T = 256 # PPO steps to get envs data
 M = 64 # mini batch size
 K = 10 # PPO epochs repeated to optimise
-T_EPOCHS = 50 # T_EPOCH to test and save
+T_EPOCHS = 100 # T_EPOCH to test and save
 N_TESTS = 10 # do N_TESTS tests
 TARGET_REWARD = 20
 TRANSFER_LEARNING = False
 EMBED_DIM = H_SIZE
 LOOK_BACK_SIZE = 256
 NUM_ATTN_LAYERS = 4
+STEP_REWARD = 0.001
 
 MODEL_DIR = 'models'
-MODEL = 'ppo_demo.attention_gtrxl_mem'
+MODEL = 'ppo_demo.custom.step_reward'
 # ENV_ID = 'Pong-v0'
 ENV_ID = 'PongDeterministic-v0'
 
@@ -184,12 +185,6 @@ class ActorCritic(nn.Module):
             ('flatten', nn.Flatten()),
             ('linear', nn.Linear(in_features=32 * 9 * 9, out_features=hidden_size)),
         ]))
-        self.layer_num = NUM_ATTN_LAYERS
-        layers = []
-        for i in range(self.layer_num):
-            layers.append(MyTransformerEncoderLayer(embed_dim, 16, embed_dim * 2))
-        self.layers = nn.Sequential(*layers)
-
         self.critic = nn.Sequential(  # The “Critic” estimates the value function
             # nn.Linear(in_features=hidden_size, out_features=hidden_size),
             # nn.ReLU(),
@@ -202,85 +197,12 @@ class ActorCritic(nn.Module):
             nn.Softmax(dim=1),
         )
 
-    def forward(self, x, memory, mask=None, return_score=False):
+    def forward(self, x):
         feature = self.feature(x)
-        query = feature.unsqueeze(dim=0) # sequence first
-        out = query
-        feature_attn_list = [out.squeeze(dim=0)]
-        scores_list = []
-        for i in range(self.layer_num):
-            attn_layer = self.layers[i]
-            out, scores = attn_layer(out, memory[i], src_key_padding_mask=mask[i])
-            feature_attn_list.append(out.squeeze(dim=0))
-            scores_list.append(scores)
-        attn_out = out.squeeze(dim=0)
-        value = self.critic(attn_out)
-        probs = self.actor(attn_out)
+        value = self.critic(feature)
+        probs = self.actor(feature)
         dist = Categorical(probs)
-        if return_score:
-            return dist, value, feature_attn_list, scores_list
-        else:
-            return dist, value, feature_attn_list
-
-
-# class SeqTorch:
-#     def __init__(self, seq_len=LOOK_BACK_SIZE, batch_size=N, rolling_size=T, feature_size=EMBED_DIM, device='cpu'):
-#         self.seq_len = seq_len
-#         self.batch_size = batch_size
-#         self.rolling_size = rolling_size
-#         self.seq_features = torch.zeros((seq_len + rolling_size) * batch_size, feature_size).to(device)
-#         self.seq_masks = torch.zeros(rolling_size * batch_size, 1).to(device)
-#
-#     def flip_seq_idx(self, idx):
-#         seq_idx = (self.rolling_size - 1 - idx // self.batch_size) * self.batch_size + idx % self.batch_size  # invert index, when N=2, [509, 511] should select [3,1] index
-#         return seq_idx
-#
-#     def fetch_seq(self, idx):
-#         seq = self.seq_features
-#         mask = self.seq_masks
-#         # reverse_mask = None if mask is None else torch.flip(mask.view(T, N, -1), dims=[0]).view(T * N, -1)
-#         results = []
-#         for start in idx:
-#             # indices = torch.arange(start, start + LOOK_BACK_SIZE * N, N)
-#             # d = torch.index_select(seq, 0, indices)
-#             d = seq[start:start + self.seq_len * self.batch_size:self.batch_size] * 1  # will make a new tensor
-#             # mask_value, _ = torch.cummin(reverse_mask[start::N], dim=0)
-#             # results.append(d * mask_value)
-#
-#             i = torch.arange(start, mask.shape[0], self.batch_size)
-#             is_zero = (mask[i, 0] == 0)
-#             non_zero_pos = is_zero.nonzero()
-#             if non_zero_pos.shape[0] > 0:
-#                 first_zero_index = non_zero_pos.min()
-#                 d[first_zero_index:] = 0  # d is a new tensor, no modification to seq
-#             results.append(d.unsqueeze(dim=1))
-#         sub_seq = torch.cat(results, dim=1)
-#         return sub_seq
-#
-#     def _roll_seq(self, seq, data, order=0):
-#         if order == -1:
-#             start = data.shape[0]
-#             end = seq.shape[0]
-#             seq = torch.cat((seq[start:end], data), dim=0)
-#         else:
-#             start = 0
-#             end = seq.shape[0] - data.shape[0]
-#             seq = torch.cat((data, seq[start:end]), dim=0)
-#         return seq
-#
-#     def roll_seq_feature(self, data):
-#         self.seq_features = self._roll_seq(self.seq_features, data)
-#
-#     def roll_seq_mask(self, data):
-#         self.seq_masks = self._roll_seq(self.seq_masks, data)
-#
-#     def mask_last_epoch(self, last_mask):
-#         seq = self.seq_features
-#         if last_mask is not None:
-#             mask = last_mask.view(-1, self.batch_size, 1)
-#             cum_mask, _ = mask.cummin(dim=0)
-#             cum_mask = cum_mask.view(-1, 1)
-#             seq[self.rolling_size:self.rolling_size + cum_mask.shape[0]] *= cum_mask  # modify seq inplace
+        return dist, value
 
 
 def normalize(x):
@@ -324,21 +246,19 @@ def compute_gae(next_value, rewards, masks, values, gamma=G_GAE, lam=L_GAE):
     return returns
 
 
-def ppo_iter(states, actions, log_probs, returns, advantages, seq_list):
+def ppo_iter(states, actions, log_probs, returns, advantages):
     batch_size = states.size(0)  # lenght of data collected
 
     for _ in range(batch_size // M):
         rand_ids = np.random.randint(0, batch_size, M)  # integer array of random indices for selecting M mini batches
-        reverse_ids = seq_list[0].flip_seq_idx(rand_ids) + 1  # one more item: 0->256, not 255
-        seq_feature, seq_mask = _get_seq_mem_mask(seq_list, reverse_ids)
-        yield states[rand_ids, :], actions[rand_ids, :], log_probs[rand_ids, :], returns[rand_ids, :], advantages[rand_ids, :], seq_feature, seq_mask
+        yield states[rand_ids, :], actions[rand_ids, :], log_probs[rand_ids, :], returns[rand_ids, :], advantages[rand_ids, :]
 
 
-def ppo_update(model, optimizer, states, actions, log_probs, returns, advantages, seq_list, clip_param=E_CLIP):
+def ppo_update(model, optimizer, states, actions, log_probs, returns, advantages, clip_param=E_CLIP):
     params_feature = model.get_parameter('feature.linear.weight')
     for _ in range(K):
-        for state, action, old_log_probs, return_, advantage, seq_feature, seq_mask in ppo_iter(states, actions, log_probs, returns, advantages, seq_list):
-            dist, value, _ = model(state, seq_feature, seq_mask)
+        for state, action, old_log_probs, return_, advantage in ppo_iter(states, actions, log_probs, returns, advantages):
+            dist, value = model(state)
             action = action.reshape(1, len(action)) # take the relative action and take the column
             new_log_probs = dist.log_prob(action)
             new_log_probs = new_log_probs.reshape(len(old_log_probs), 1) # take the column
@@ -467,7 +387,7 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
         conv_models.append(conv)
 
     global writer
-    writer = MySummaryWriter(0, T_EPOCHS * T * 2, comment=f'.{MODEL}.{ENV_ID}')
+    writer = MySummaryWriter(0, T_EPOCHS * T, comment=f'.{MODEL}.{ENV_ID}')
     env_test = gym.make(ENV_ID, render_mode='rgb_array')
 
     state = envs.reset()
@@ -477,9 +397,6 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
     total_runs_1_env = 0
     steps_1_env = 0
 
-    seq_list = [Seq(seq_len=LOOK_BACK_SIZE, batch_size=N, rolling_size=T, feature_size=EMBED_DIM, device=device) for i in range(NUM_ATTN_LAYERS)]
-    fixed_idx = np.asarray([j for j in range(N)])
-
     while not early_stop:
         log_probs = []
         values = []
@@ -487,11 +404,10 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
         actions = []
         rewards = []
         masks = []
-        attn_scores = []
 
         for i in range(T):
             state = torch.FloatTensor(state).to(device)
-            dist, value, feature_attn_list, scores_list = model(state, *_get_seq_mem_mask(seq_list, fixed_idx), return_score=True)
+            dist, value = model(state)
             action = dist.sample().to(device)
             next_state, reward, done, _ = envs.step(action.cpu().numpy())
             next_state = grey_crop_resize_batch(next_state)  # simplify perceptions (grayscale-> crop-> resize) to train CNN
@@ -505,9 +421,6 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
             masks.append(torch.FloatTensor(1 - done).unsqueeze(1).to(device))
             states.append(state)
             state = next_state
-            _roll_seq_mem_mask(seq_list, feature_attn_list, 1 - done[:, np.newaxis])
-
-            attn_scores.append(torch.concat([score[0].detach().cpu() for score in scores_list]))
 
             total_reward_1_env += reward[0]
             steps_1_env += 1
@@ -519,7 +432,7 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
                 steps_1_env = 0
 
         next_state = torch.FloatTensor(next_state).to(device)  # consider last state of the collection step
-        _, next_value, _ = model(next_state, *_get_seq_mem_mask(seq_list, fixed_idx))  # collect last value effect of the last collection step
+        _, next_value = model(next_state)  # collect last value effect of the last collection step
         returns = compute_gae(next_value, rewards, masks, values)
         returns = torch.cat(returns).detach()  # concatenates along existing dimension and detach the tensor from the network graph, making the tensor no gradient
         log_probs = torch.cat(log_probs).detach()
@@ -534,7 +447,7 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
         writer.update_global_step(total_steps)
 
         results = ppo_update(
-            model, optimizer, states, actions, log_probs, returns, advantages, seq_list)
+            model, optimizer, states, actions, log_probs, returns, advantages)
 
         writer.add_scalar('Loss/Total Loss', results['loss'].item(), total_steps)
         writer.add_scalar('Loss/Actor Loss', results['actor_loss'].item(), total_steps)
@@ -542,10 +455,6 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
         writer.add_scalar('Loss/Entropy Loss', results['entropy_loss'].item(), total_steps)
 
         if writer.check_steps():
-            attn_scores = torch.stack(attn_scores).permute(1, 0, 2)
-            for k in range(attn_scores.shape[0]):
-                writer.add_image(f"score/{k}", attn_scores[k].unsqueeze(0), total_steps)
-
             for i in range(num_convs):
                 b, c, h, w = conv_models[i].feature_map.shape
                 feature_map = conv_models[i].feature_map[:16].transpose(0, 1).unsqueeze(dim=2).reshape(-1, 1, h, w)
@@ -623,24 +532,14 @@ def test_env(env, model, device):
 
     done = False
     total_reward = 0
-
-    # set rolling_size=0
-    seq_list = [Seq(seq_len=LOOK_BACK_SIZE, batch_size=1, rolling_size=0, feature_size=EMBED_DIM, device=device) for i in range(NUM_ATTN_LAYERS)]
-    fixed_idx = np.asarray([j for j in range(1)])
-
     while not done:
         state = torch.FloatTensor(state).unsqueeze(0).to(device)
-        dist, _, feature_attn_list = model(state, *_get_seq_mem_mask(seq_list, fixed_idx))
+        dist, _ = model(state)
         action = dist.sample().cpu().numpy()[0]
         next_state, reward, done, _, _ = env.step(action)
         next_state = grey_crop_resize(next_state)
         state = next_state
         total_reward += reward
-
-        done = np.asarray([done])
-        mask = 1 - done[:, np.newaxis]
-        _roll_seq_mem_mask(seq_list, feature_attn_list, mask)
-
     return total_reward
 
 
