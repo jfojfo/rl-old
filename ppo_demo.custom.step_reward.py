@@ -41,7 +41,7 @@ NUM_ATTN_LAYERS = 4
 STEP_REWARD = 0.002
 
 MODEL_DIR = 'models'
-MODEL = f'ppo_demo.custom.step_reward_{STEP_REWARD}'
+MODEL = f'ppo_demo.custom.step_reward_{STEP_REWARD}_norm_std'
 # ENV_ID = 'Pong-v0'
 ENV_ID = 'PongDeterministic-v0'
 
@@ -440,7 +440,8 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
         states = torch.cat(states)
         actions = torch.cat(actions)
         advantages = returns - values  # compute advantage for each action
-        advantages = normalize(advantages)  # compute the normalization of the vector to make uniform values
+        # advantages = normalize(advantages)  # compute the normalization of the vector to make uniform values
+        advantages /= (advantages.std() + 1e-8)
 
         train_epoch += 1
         total_steps = train_epoch * T
