@@ -39,9 +39,9 @@ TRANSFER_LEARNING = False
 EMBED_DIM = H_SIZE
 LOOK_BACK_SIZE = 256
 NUM_ATTN_LAYERS = 4
-MIN_ACTION_SEQ_LEN = 10
-MAX_ACTION_SEQ_LEN = 100  # don't exceeds T
-WEIGHT_REPEAT_ACTION = 0.002
+MIN_ACTION_SEQ_LEN = 100
+MAX_ACTION_SEQ_LEN = 500
+WEIGHT_REPEAT_ACTION = 0.1
 
 MODEL_DIR = 'models'
 MODEL = f'ppo_demo.custom.norm_std.repeat_action.WEIGHT_REPEAT_ACTION_{WEIGHT_REPEAT_ACTION}_ACTION_SEQ_LEN_{MIN_ACTION_SEQ_LEN}_{MAX_ACTION_SEQ_LEN}'
@@ -420,9 +420,12 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
             compress_len_delta = []
             for idx, a in enumerate(action.cpu()):
                 action_seqs[idx] += bytes([a.item()])
-                compress_len_old = lz4.frame.compress(action_seqs[idx][-action_seq_len:-1])
-                compress_len_new = lz4.frame.compress(action_seqs[idx][-action_seq_len:])
-                compress_len_delta.append(len(compress_len_old) - len(compress_len_new))
+                if len(action_seqs[idx]) <= MIN_ACTION_SEQ_LEN:
+                    compress_len_delta.append(1)
+                else:
+                    compress_len_old = lz4.frame.compress(action_seqs[idx][-action_seq_len:-1])
+                    compress_len_new = lz4.frame.compress(action_seqs[idx][-action_seq_len:])
+                    compress_len_delta.append(len(compress_len_new) - len(compress_len_old))
             compress_len_delta = np.array(compress_len_delta)
 
             next_state, reward, done, _ = envs.step(action.cpu().numpy())
@@ -433,7 +436,7 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
             action_vect = action.reshape(len(action), 1)  # transpose from row to column
             actions.append(action_vect)
             values.append(value)
-            rewards.append(torch.FloatTensor(reward + WEIGHT_REPEAT_ACTION * compress_len_delta).unsqueeze(1).to(device))
+            rewards.append(torch.FloatTensor(reward + WEIGHT_REPEAT_ACTION * compress_reward(compress_len_delta)).unsqueeze(1).to(device))
             masks.append(torch.FloatTensor(1 - done).unsqueeze(1).to(device))
             states.append(state)
             state = next_state
@@ -508,6 +511,13 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
 
             if test_reward > TARGET_REWARD:  # stop training if archive the best
                 early_stop = True
+
+
+def compress_reward(l):
+    # 1 / np.exp(l): -2 -1 0 1 2 -> 7.39 2.72 1.0 0.37 0.14
+    r = 1 / np.exp(l)
+    r[r < 1] = 0
+    return r
 
 
 def train(load_from=None):
