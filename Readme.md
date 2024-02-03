@@ -1,3 +1,6 @@
+深度学习可视化中间变量的神器Visualizer
+https://www.zhihu.com/question/384519338/answer/2620414587
+
 # 总结
 不论是demo版还是episode版，single round(reward=-1或1时就认为done了)居然起步慢，这是没想到的，
 demo版还直接失败(收敛慢，得分0左右停止训练了)，single round结束时己方球拍实际上是可以上下移动的，不会重置到中间位置，所以重置为done不合理；
@@ -38,7 +41,7 @@ demo diff版，没想象中效果好，是否与VecENv done之后返回下一局
 
 # ppo_demo.vae
 
-vae版
+vae版：vae_ac_from_latent对应ppo_demo.vae2.py
 
 ppo_demo.vae_recon_mean_kl_loss_c3_0.01.PongDeterministic-v0：reconstruction loss改为mean，c3、c4都调小为0.01，
 起步快，比ppo_demo基础版都快，中间能训练到20，但时间长了会掉落回-20，且波动大不稳定，test reward不及基础版。
@@ -61,6 +64,8 @@ BatchNorm限定在update步骤
 
 # ppo_demo.attention
 
+ppo_demo.attention.py
+
 attention版，Conv后的feature组成sequence，每次step后Conv得到feature作为query，去历史sequence中查key、value得到attention
 
 16起步比64快，后期64的test分高一些，且train得分波动小一些，两者在test时分数都有大幅下跌的情况
@@ -69,7 +74,12 @@ attention版，Conv后的feature组成sequence，每次step后Conv得到feature�
 * ppo_demo.attention_test_64.PongDeterministic-v0：成功，look_back_size=64
 * ppo_demo.attention_64_pos_encode.PongDeterministic-v0：成功，look_back_size=64，加PositionalEmbedding，得分比不加pos encoding略低
 
+前面都有mask bug（-1e-7应该改为-1e7，或者float('-inf')，-inf需要避免全部mask的case）
+
+
 # ppo_demo.attention_seg_img
+
+ppo_demo.attention_seg_img.py
 
 attention_seg_img版，去掉Conv，只用Sequence。
 将84x84 image切分成7x7块12x12的patches，每个patch展开后embed dim=144，sequence len=49
@@ -83,4 +93,44 @@ attention_seg_img版，去掉Conv，只用Sequence。
   * seq4：AdaptiveAvgPool1d 缩减embed为18，3 heads，36 linear；
 
 
+# ppo_demo.attention_pred
+
+ppo_demo.attention_pred.py
+ppo_demo.attention_pred_mini.py
+
+* ppo_demo.attention_pred_16_c3_1.PongDeterministic-v0：成功，c3=1，添加一个预测分支：attn_out+action预测next_state的feature
+
+前面都有mask bug（-1e-7应该改为-1e7，或者float('-inf')，-inf需要避免全部mask的case）
+
+memory每次根据states计算，速度太慢
+
+# ppo_demo.seg_img_pos
+
+ppo_demo.seg_img_pos.py
+
+* ppo_demo.seg_img_base.PongDeterministic-v0：成功，速度快，2h差不多，划分为12x12个7x7 patches，每个patch 3x3 conv 2次得到（16,1,1）块，再flatten得到patch_feature
+* ppo_demo.seg_img_pos.PongDeterministic-v0：失败，10分左右，将2维坐标one-hot后concat到前面patch_feature（concat后dim=16+12+12），再linear回dim=16
+* ppo_demo.seg_img_pos_embed.PongDeterministic-v0：不稳定，18分后又掉到10甚至-10分，用nn.Embedding(NUM_Y * NUM_X, embed_dim)直接embed位置，再加到patch_feature（参考ViT）
+
+# attention_gtrxl_mem
+
+ppo_demo.attention_gtrxl_mem.py
+
+* ppo_demo.attention_gtrxl_mem.PongDeterministic-v0：15分左右，仅参考了gtrxl的mem设计，4层attn layers，look back 256，memory_concat时对 out detach(torch.cat([out.detach(), memory[i]], dim=0))
+* attention_gau_look_back_256_attn_layers_4.PongDeterministic-v0：比前一个得分低一些，得分波动大，memory_concat 未对 out detach
+
+
+# step reward
+
+ppo_demo.custom.step_reward.py
+
+* ppo_demo.custom.step_reward_0.002_norm_std.PongDeterministic-v0：20分，每step奖励0.002，advantages /= (advantages.std() + 1e-8)
+
+
+# norm_std
+
+ppo_demo.custom.norm_std.py
+
+* ppo_demo.custom.norm_std.PongDeterministic-v0：advantages /= (advantages.std() + 1e-8)，第一次获得21分自动结束（得分曲线有一段落下），第二次20分（得分曲线正常上升)
+* ppo_demo.custom.norm_std.repeat_action.PongDeterministic-v0：失败，参考论文https://arxiv.org/pdf/2305.17109.pdf
 
