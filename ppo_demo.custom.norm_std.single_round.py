@@ -7,7 +7,7 @@ import torch.nn as nn
 import torch.optim as optim
 from PIL import Image
 from torch.distributions import Categorical
-from utils import MySummaryWriter
+from utils import *
 from stable_baselines3.common.vec_env import VecVideoRecorder, SubprocVecEnv
 import argparse
 from torchinfo import summary
@@ -40,7 +40,7 @@ LOOK_BACK_SIZE = 256
 NUM_ATTN_LAYERS = 4
 
 MODEL_DIR = 'models'
-MODEL = f'ppo_demo.custom.norm_std'
+MODEL = f'ppo_demo.custom.norm_std.single_round'
 # ENV_ID = 'Pong-v0'
 ENV_ID = 'PongDeterministic-v0'
 
@@ -409,6 +409,8 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
             dist, value = model(state)
             action = dist.sample().to(device)
             next_state, reward, done, _ = envs.step(action.cpu().numpy())
+            done_1_env = done[0]
+            done[reward != 0] = True
             next_state = grey_crop_resize_batch(next_state)  # simplify perceptions (grayscale-> crop-> resize) to train CNN
             log_prob = dist.log_prob(action)  # needed to compute probability ratio r(theta) that prevent policy to vary too much probability related to each action (make the computations more robust)
             log_prob_vect = log_prob.reshape(len(log_prob), 1)  # transpose from row to column
@@ -423,7 +425,7 @@ def ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_e
 
             total_reward_1_env += reward[0]
             steps_1_env += 1
-            if done[0]:
+            if done_1_env:
                 total_runs_1_env += 1
                 print(f'Run {total_runs_1_env}, steps {steps_1_env}, Reward {total_reward_1_env}')
                 writer.add_scalar('Reward/train_reward_1_env', total_reward_1_env, train_epoch * T + i + 1)
@@ -523,7 +525,14 @@ def train(load_from=None):
     print(model)
     print(optimizer)
 
+    if True:
+        import wandb
+        wandb_login()
+        wandb.init(project='RL-PPO-Pong-RepeatAction', sync_tensorboard=True)
     ppo_train(model, envs, device, optimizer, test_rewards, test_epochs, train_epoch, best_reward)
+    if True:
+        import wandb
+        wandb.finish()
 
 
 def test_env(env, model, device):
